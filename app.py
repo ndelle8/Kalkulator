@@ -6,33 +6,27 @@ import os
 import numpy as np
 import easyocr
 import re
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from PIL import Image
 
-# --- KONFIGURACJA ---
+# --- KONFIGURACJA I INICJALIZACJA ---
 st.set_page_config(page_title="Kalkulator Zarobków PRO", page_icon="💰", layout="wide")
 
 @st.cache_resource
 def load_ocr():
-    # Pobieramy model dla języka polskiego
-    return easyocr.Reader(['pl'])
+    # Model 'pl' jest wymagany do rozpoznawania polskich znaków
+    return easyocr.Reader(['pl'], gpu=False) # gpu=False jest bezpieczniejsze na Streamlit Cloud
 
-reader = load_ocr()
-
-def parse_time_to_decimal(time_str):
-    """Zamienia tekst typu '6:00' lub '14:30' na liczbę (np. 8.5)"""
-    try:
-        # Usuwamy litery, zostawiamy cyfry i separatory
-        clean = re.sub(r'[^0-9:.,]', '', time_str).replace(',', '.').replace(':', '.')
-        if '.' in clean:
-            parts = clean.split('.')
-            h = int(parts[0])
-            m = int(parts[1]) if len(parts) > 1 and parts[1] else 0
-            # Obsługa formatu '6.00' -> 6h, '14.30' -> 14.5h
-            return h + (m / 60.0)
-        return float(clean)
-    except:
-        return None
+# --- FUNKCJE POMOCNICZE ---
+def get_working_hours_pl(year, month):
+    pl_holidays = holidays.Poland(years=year)
+    working_days = 0
+    num_days = calendar.monthrange(year, month)[1]
+    for day in range(1, num_days + 1):
+        curr_date = date(year, month, day)
+        if curr_date.weekday() < 5 and curr_date not in pl_holidays:
+            working_days += 1
+    return working_days * 8
 
 # --- BOCZNY PANEL ---
 with st.sidebar:
@@ -48,80 +42,113 @@ with st.sidebar:
     stawka_podst = st.number_input("Stawka podstawowa (zł/h):", value=25.0)
     dodatek_nadg = st.number_input("Dodatek za nadgodzinę (+ zł):", value=30.0)
 
-st.title("💰 Inteligentny Kalkulator Wypłaty")
+st.title("💰 Kalkulator Wypłaty")
 
 tab1, tab2, tab3 = st.tabs(["🧮 Obliczenia", "📊 Historia", "📸 Skanuj Grafik"])
 
+# --- TAB 1: OBLICZENIA ---
+with tab1:
+    h_etat = get_working_hours_pl(wybrany_rok, m_idx)
+    st.info(f"Wymiar czasu pracy w {wybrany_m_nazwa} {wybrany_rok}: **{h_etat}h**")
+    
+    # Inicjalizacja wartości z OCR jeśli istnieją
+    h_std_val = st.session_state.get('ocr_std', float(h_etat))
+    h_nad_val = st.session_state.get('ocr_nad', 0.0)
+    h_sob_val = st.session_state.get('ocr_sob', 0.0)
+    h_nie_val = st.session_state.get('ocr_nie', 0.0)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        h_p = st.number_input("Godziny standardowe:", value=h_std_val)
+        h_n = st.number_input("Nadgodziny:", value=h_nad_val)
+    with c2:
+        h_s = st.number_input("Soboty (+50%):", value=h_sob_val)
+        h_ni = st.number_input("Niedziele (+100%):", value=h_nie_val)
+
+    total = (h_p * stawka_podst) + (h_n * (stawka_podst + dodatek_nadg)) + \
+            (h_s * stawka_podst * 1.5) + (h_ni * stawka_podst * 2.0)
+    
+    st.divider()
+    st.metric("Suma do wypłaty (Brutto)", f"{total:,.2f} zł")
+
+# --- TAB 3: SKANOWANIE (POPRAWIONE) ---
 with tab3:
     st.subheader("Automatyczna analiza zdjęcia")
     plik_foto = st.file_uploader("Wgraj zdjęcie grafiku:", type=['jpg', 'jpeg', 'png'])
     
     if plik_foto:
         image = Image.open(plik_foto)
-        st.image(image, caption="Twój grafik", width=500)
+        # Zmniejszamy obraz, aby nie przepełnić pamięci RAM
+        image.thumbnail((1000, 1000)) 
+        st.image(image, caption="Podgląd zdjęcia", width=400)
         
-        if st.button("🚀 Analizuj i rozlicz godziny"):
-            with st.spinner("AI analizuje tabelę..."):
-                img_array = np.array(image)
-                wynik = reader.readtext(img_array)
-                
-                # Szukanie współrzędnych kolumn
-                col_x = {"start": None, "end": None, "total": None}
-                for (bbox, tekst, prob) in wynik:
+        if st.button("🚀 Analizuj grafik"):
+            try:
+                with st.spinner("Uruchamiam silnik OCR..."):
+                    reader = load_ocr()
+                    img_array = np.array(image)
+                    wyniki_ocr = reader.readtext(img_array)
+
+                # 1. Szukamy kolumny "Ilość godzin"
+                header_x = None
+                for (bbox, tekst, prob) in wyniki_ocr:
                     t = tekst.lower()
-                    if "przyj" in t: col_x["start"] = (bbox[0][0] + bbox[1][0]) / 2
-                    if "wyj" in t: col_x["end"] = (bbox[0][0] + bbox[1][0]) / 2
-                    if "ilo" in t or "godz" in t: col_x["total"] = (bbox[0][0] + bbox[1][0]) / 2
+                    if "ilo" in t or "godz" in t:
+                        header_x = (bbox[0][0] + bbox[1][0]) / 2
+                        st.write(f"✅ Znaleziono kolumnę: {tekst}")
+                        break
 
-                # Zbieranie danych wiersz po wierszu
-                dni_data = {i: {"start": "", "end": "", "total": ""} for i in range(1, 32)}
-                
-                for (bbox, tekst, prob) in wynik:
-                    x_c = (bbox[0][0] + bbox[1][0]) / 2
-                    y_c = (bbox[0][1] + bbox[2][1]) / 2
-                    
-                    # Ignorujemy nagłówki (prymitywne filtrowanie po wysokości Y)
-                    if y_c < 150: continue 
+                if header_x is None:
+                    st.error("❌ Nie znalazłem nagłówka 'Ilość godzin'. Zrób wyraźniejsze zdjęcie górnej części tabeli.")
+                else:
+                    # 2. Zbieramy liczby pod nagłówkiem
+                    data_points = []
+                    for (bbox, tekst, prob) in wyniki_ocr:
+                        # Szukamy cyfr, ale ignorujemy kreski i napisy
+                        cyfry = "".join(filter(str.isdigit, tekst))
+                        if cyfry:
+                            liczba = int(cyfry)
+                            x_center = (bbox[0][0] + bbox[1][0]) / 2
+                            y_center = (bbox[0][1] + bbox[2][1]) / 2
+                            
+                            # Filtrujemy tylko to, co jest w kolumnie i jest sensowną liczbą godzin
+                            if abs(x_center - header_x) < 70 and 1 <= liczba <= 24:
+                                data_points.append({'y': y_center, 'val': liczba})
 
-                    # Przypisujemy tekst do wiersza (dnia) na podstawie wysokości Y
-                    # W Twoim grafiku wiersze są dość równe, więc dzielimy obraz na 31 części
-                    # (To uproszczenie - lepiej działa grupowanie po y_center)
-                    # Szukamy też kolumny LP (Liczba porządkowa), aby wiedzieć który to dzień
-                    
-                # Statystyki końcowe
-                pl_holidays = holidays.Poland(years=wybrany_rok)
-                podsumowanie = {"std": 0.0, "nad": 0.0, "sob": 0.0, "nie": 0.0}
-                
-                # LOGIKA ANALIZY DANYCH (uproszczona na potrzeby darmowego OCR)
-                # Szukamy wszystkich liczb w kolumnie 'Ilość godzin'
-                extracted_hours = []
-                for (bbox, tekst, prob) in wynik:
-                    x_c = (bbox[0][0] + bbox[1][0]) / 2
-                    if col_x["total"] and abs(x_c - col_x["total"]) < 60:
-                        val = "".join(filter(str.isdigit, tekst))
-                        if val and 1 <= int(val) <= 24:
-                            extracted_hours.append(int(val))
+                    # Sortujemy od góry do dołu
+                    data_points.sort(key=lambda x: x['y'])
 
-                # Rozdzielanie na dni (zakładamy kolejność od góry)
-                for i, h in enumerate(extracted_hours[:31]):
-                    dzien = i + 1
-                    curr_date = date(wybrany_rok, m_idx, dzien)
-                    wday = curr_date.weekday()
+                    # 3. Rozliczanie
+                    pl_holidays = holidays.Poland(years=wybrany_rok)
+                    dni_w_miesiacu = calendar.monthrange(wybrany_rok, m_idx)[1]
+                    stats = {"std": 0.0, "nad": 0.0, "sob": 0.0, "nie": 0.0}
 
-                    if wday == 5: podsumowanie["sob"] += h
-                    elif wday == 6 or curr_date in pl_holidays: podsumowanie["nie"] += h
-                    else:
-                        if h > 8:
-                            podsumowanie["std"] += 8
-                            podsumowanie["nad"] += (h - 8)
+                    for i, p in enumerate(data_points[:dni_w_miesiacu]):
+                        dzien = i + 1
+                        h = float(p['val'])
+                        curr_d = date(wybrany_rok, m_idx, dzien)
+                        
+                        if curr_d.weekday() == 5: stats["sob"] += h
+                        elif curr_d.weekday() == 6 or curr_d in pl_holidays: stats["nie"] += h
                         else:
-                            podsumowanie["std"] += h
+                            if h > 8:
+                                stats["std"] += 8
+                                stats["nad"] += (h - 8)
+                            else: stats["std"] += h
 
-                st.success("✅ Analiza zakończona!")
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Standard", f"{podsumowanie['std']}h")
-                c2.metric("Nadgodziny", f"{podsumowanie['nad']}h")
-                c3.metric("Soboty", f"{podsumowanie['sob']}h")
-                c4.metric("Nd/Święta", f"{podsumowanie['nie']}h")
-                
-                st.info("Pamiętaj: Jeśli suma się nie zgadza, sprawdź czy zdjęcie było proste i wyraźne.")
+                    # Zapisujemy do sesji, by Tab 1 mógł to odczytać
+                    st.session_state['ocr_std'] = stats["std"]
+                    st.session_state['ocr_nad'] = stats["nad"]
+                    st.session_state['ocr_sob'] = stats["sob"]
+                    st.session_state['ocr_nie'] = stats["nie"]
+
+                    st.success("✅ Analiza zakończona pomyślnie!")
+                    st.columns(4)[0].metric("Standard", f"{stats['std']}h")
+                    st.columns(4)[1].metric("Nadgodziny", f"{stats['nad']}h")
+                    st.columns(4)[2].metric("Soboty", f"{stats['sob']}h")
+                    st.columns(4)[3].metric("Nd/Święta", f"{stats['nie']}h")
+                    st.balloons()
+
+            except Exception as e:
+                st.error(f"⚠️ Wystąpił błąd podczas analizy: {e}")
+                st.info("Spróbuj wgrać mniejsze zdjęcie lub odświeżyć stronę.")
