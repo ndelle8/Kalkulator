@@ -2,62 +2,82 @@ import streamlit as st
 from datetime import datetime
 import pandas as pd
 import os
+import calendar
 
 # Ustawienia strony
-st.set_page_config(page_title="System Zarobków 2026", page_icon="🏦", layout="wide")
+st.set_page_config(page_title="System Zarobków Multi-Year", page_icon="🏦", layout="wide")
 
-# --- PLIK BAZY DANYCH ---
-DB_FILE = "historia_zarobkow.csv"
+# --- KONFIGURACJA BAZY DANYCH ---
+DB_FILE = "historia_zarobkow_v2.csv"
 
 def load_data():
     if os.path.exists(DB_FILE):
-        return pd.read_csv(DB_FILE)
-    return pd.DataFrame(columns=["Miesiąc", "Podstawowe", "Nadgodziny", "Soboty", "Niedziele", "Suma Brutto"])
+        df = pd.read_csv(DB_FILE)
+        # Upewnienie się, że kolumna Rok istnieje dla starych wpisów
+        if "Rok" not in df.columns:
+            df["Rok"] = 2026
+        return df
+    return pd.DataFrame(columns=["Rok", "Miesiąc", "Podstawowe", "Nadgodziny", "Soboty", "Niedziele", "Suma Brutto"])
 
 def save_to_db(data_row):
     df = load_data()
-    # Sprawdź czy miesiąc już istnieje - jeśli tak, zaktualizuj go
-    df = df[df["Miesiąc"] != data_row["Miesiąc"]]
+    # Usuwamy stary wpis dla tego samego roku i miesiąca, jeśli istnieje
+    df = df[~((df["Rok"] == data_row["Rok"]) & (df["Miesiąc"] == data_row["Miesiąc"]))]
     df = pd.concat([df, pd.DataFrame([data_row])], ignore_index=True)
     df.to_csv(DB_FILE, index=False)
     return df
 
-# --- DANE O GODZINACH PRACY 2026 ---
-godziny_2026 = {
-    1: ("Styczeń", 160), 2: ("Luty", 160), 3: ("Marzec", 176),
-    4: ("Kwiecień", 168), 5: ("Maj", 160), 6: ("Czerwiec", 168),
-    7: ("Lipiec", 184), 8: ("Sierpień", 160), 9: ("Wrzesień", 176),
-    10: ("Październik", 176), 11: ("Listopad", 160), 12: ("Grudzień", 160)
-}
-
-aktualny_miesiac_idx = datetime.now().month
-nazwa_miesiaca, domyslne_godziny = godziny_2026[aktualny_miesiac_idx]
+# --- FUNKCJA OBLICZAJĄCA GODZINY ETATOWE ---
+def get_working_hours(year, month):
+    # Liczy dni robocze (Pn-Pt) w danym miesiącu
+    cal = calendar.Calendar()
+    working_days = len([d for d in cal.itermonthdays2(year, month) if d[0] != 0 and d[1] < 5])
+    # Uwaga: Ten uproszczony model nie odejmuje świąt ustawowych (np. 1 maja), 
+    # ale pozwala na ręczną korektę w formularzu.
+    return working_days * 8
 
 # --- PASEK BOCZNY ---
 with st.sidebar:
+    st.header("📅 Wybór Okresu")
+    wybrany_rok = st.selectbox("Rok:", options=[2024, 2025, 2026, 2027, 2028], index=2) # Domyślnie 2026
+    
+    st.divider()
     st.header("⚙️ Ustawienia Stawek")
     stawka_podstawowa = st.number_input("Stawka podstawowa (zł/h):", min_value=0.0, value=20.0)
     dodatek_nadgodziny = st.number_input("Dodatek za nadgodzinę (+ zł):", min_value=0.0, value=30.0)
     
     st.divider()
-    st.header("📅 Wymiar czasu 2026")
-    for idx, (m, h) in godziny_2026.items():
-        style = "**👉" if idx == aktualny_miesiac_idx else ""
-        st.markdown(f"{style} {m}: {h}h")
+    st.subheader(f"Wymiar czasu {wybrany_rok}")
+    miesiace_nazwy = ["Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec", 
+                      "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"]
+    
+    for i, m in enumerate(miesiace_nazwy, 1):
+        h = get_working_hours(wybrany_rok, i)
+        is_current = (wybrany_rok == datetime.now().year and i == datetime.now().month)
+        style = "**👉" if is_current else ""
+        st.write(f"{style} {m}: {h}h")
 
 # --- GŁÓWNY FORMULARZ ---
-st.title(f"💰 Kalkulator za {nazwa_miesiaca}")
+aktualny_m_idx = datetime.now().month if wybrany_rok == datetime.now().year else 1
+nazwa_miesiaca = miesiace_nazwy[aktualny_m_idx - 1]
+domyslne_godziny = get_working_hours(wybrany_rok, aktualny_m_idx)
 
-tab1, tab2 = st.tabs(["🧮 Obliczenia", "📊 Statystyki Roku"])
+st.title(f"💰 Kalkulator Zarobków: {nazwa_miesiaca} {wybrany_rok}")
+
+tab1, tab2 = st.tabs(["🧮 Obliczenia", "📊 Statystyki i Historia"])
 
 with tab1:
+    # Wybór miesiąca do obliczeń (jeśli inny niż obecny)
+    m_do_obliczen = st.selectbox("Wybierz miesiąc do wpisania danych:", miesiace_nazwy, index=aktualny_m_idx-1)
+    h_etatowe_wybrane = get_working_hours(wybrany_rok, miesiace_nazwy.index(m_do_obliczen) + 1)
+
     col1, col2 = st.columns(2)
     with col1:
-        h_podstawowe = st.number_input("Godziny standardowe:", value=float(domyslne_godziny))
-        h_nadgodziny = st.number_input("Nadgodziny:", value=0.0)
+        h_podstawowe = st.number_input("Godziny standardowe:", value=float(h_etatowe_wybrane), key="h_p")
+        h_nadgodziny = st.number_input("Nadgodziny:", value=0.0, key="h_n")
     with col2:
-        h_soboty = st.number_input("Godziny Soboty (+50%):", value=0.0)
-        h_niedziele = st.number_input("Godziny Niedziele (+100%):", value=0.0)
+        h_soboty = st.number_input("Godziny Soboty (+50%):", value=0.0, key="h_s")
+        h_niedziele = st.number_input("Godziny Niedziele (+100%):", value=0.0, key="h_ni")
 
     # Obliczenia
     val_podst = h_podstawowe * stawka_podstawowa
@@ -67,11 +87,12 @@ with tab1:
     total = val_podst + val_nadg + val_sob + val_niedz
 
     st.divider()
-    st.metric("Suma Brutto", f"{total:,.2f} zł")
+    st.metric(f"Suma Brutto za {m_do_obliczen}", f"{total:,.2f} zł")
 
-    if st.button("💾 Zapisz dane za ten miesiąc"):
+    if st.button("💾 Zapisz dane do historii"):
         nowy_wpis = {
-            "Miesiąc": nazwa_miesiaca,
+            "Rok": wybrany_rok,
+            "Miesiąc": m_do_obliczen,
             "Podstawowe": val_podst,
             "Nadgodziny": val_nadg,
             "Soboty": val_sob,
@@ -79,24 +100,26 @@ with tab1:
             "Suma Brutto": total
         }
         save_to_db(nowy_wpis)
-        st.success(f"Pomyślnie zapisano dane za {nazwa_miesiaca}!")
+        st.success(f"Zapisano dane za {m_do_obliczen} {wybrany_rok}!")
 
 with tab2:
-    st.header("📈 Twoje zarobki w 2026")
+    st.header(f"📈 Historia zarobków")
     historia_df = load_data()
     
     if not historia_df.empty:
-        # Tabela zbiorcza
-        st.dataframe(historia_df, use_container_width=True)
+        # Filtrowanie po roku
+        widok_roku = st.selectbox("Pokaż statystyki dla roku:", options=sorted(historia_df["Rok"].unique(), reverse=True))
+        filtered_df = historia_df[historia_df["Rok"] == widok_roku]
         
-        # Wykres i podsumowanie
-        suma_rok = historia_df["Suma Brutto"].sum()
-        st.info(f"💰 Suma zarobków w tym roku: **{suma_rok:,.2f} zł**")
-        st.bar_chart(historia_df.set_index("Miesiąc")["Suma Brutto"])
-        
-        if st.button("🗑️ Wyczyść historię"):
-            if os.path.exists(DB_FILE):
-                os.remove(DB_FILE)
-                st.rerun()
+        if not filtered_df.empty:
+            st.dataframe(filtered_df.drop(columns=["Rok"]), use_container_width=True)
+            
+            suma_rok = filtered_df["Suma Brutto"].sum()
+            st.info(f"💰 Łączne zarobki w roku {widok_roku}: **{suma_rok:,.2f} zł**")
+            
+            # Wykres
+            st.bar_chart(filtered_df.set_index("Miesiąc")["Suma Brutto"])
+        else:
+            st.warning(f"Brak danych dla roku {widok_roku}.")
     else:
-        st.write("Brak zapisanych danych. Kliknij 'Zapisz' w zakładce Obliczenia.")
+        st.write("Historia jest pusta. Zapisz pierwsze dane!")
