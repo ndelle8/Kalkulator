@@ -1,78 +1,97 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+import holidays
+from datetime import datetime, date
 import calendar
+import os
 
-st.set_page_config(page_title="Prywatny Kalkulator", page_icon="💰")
+# --- KONFIGURACJA ---
+st.set_page_config(page_title="Kalkulator Zarobków PRO", page_icon="💰")
+DB_FILE = "historia_zarobkow.csv"
 
-# --- FUNKCJE ---
-def get_working_hours(year, month):
-    cal = calendar.Calendar()
-    return len([d for d in cal.itermonthdays2(year, month) if d[0] != 0 and d[1] < 5]) * 8
+# Funkcja licząca dokładne godziny robocze w Polsce (z uwzględnieniem świąt)
+def get_working_hours_pl(year, month):
+    pl_holidays = holidays.Poland(years=year)
+    working_days = 0
+    
+    # Pobierz liczbę dni w miesiącu
+    num_days = calendar.monthrange(year, month)[1]
+    
+    for day in range(1, num_days + 1):
+        curr_date = date(year, month, day)
+        # Jeśli to dzień roboczy (0-4 to Pon-Pt) i NIE jest to święto
+        if curr_date.weekday() < 5 and curr_date not in pl_holidays:
+            working_days += 1
+            
+    return working_days * 8
 
-st.title("💰 Prywatny Kalkulator Zarobków")
-st.info("Twoje dane nie są nigdzie gromadzone. Wszystko dzieje się w Twojej przeglądarce.")
+# Funkcja ładowania/zapisu danych
+def load_data():
+    if os.path.exists(DB_FILE):
+        return pd.read_csv(DB_FILE)
+    return pd.DataFrame(columns=["Rok", "Miesiąc", "Zarobek"])
 
-# --- KROK 1: WGRAJ SWOJE DANE ---
-st.subheader("1. Wgraj swoją historię (opcjonalnie)")
-uploaded_file = st.file_uploader("Jeśli masz już zapisany plik 'zarobki.csv', wgraj go tutaj:", type="csv")
-
-if uploaded_file is not None:
-    df_history = pd.read_csv(uploaded_file)
-    st.success("Wczytano Twoją historię zarobków!")
-else:
-    df_history = pd.DataFrame(columns=["Rok", "Miesiąc", "Suma_Brutto"])
-
-# --- KROK 2: OBLICZENIA ---
-st.divider()
-st.subheader("2. Dodaj nowy miesiąc")
-
+# --- BOCZNY PANEL ---
 with st.sidebar:
-    st.header("⚙️ Stawki")
-    stawka_p = st.number_input("Stawka podstawowa (zł/h):", value=20.0)
-    dodatek_n = st.number_input("Dodatek za nadgodzinę (+ zł):", value=30.0)
-    wybrany_rok = st.selectbox("Rok:", [2025, 2026, 2027], index=1)
+    st.header("⚙️ Ustawienia")
+    wybrany_rok = st.selectbox("Wybierz rok:", [2024, 2025, 2026, 2027], index=1)
+    
+    st.divider()
+    st.subheader("Stawki")
+    stawka_podst = st.number_input("Stawka podstawowa (zł/h):", value=20.0)
+    dodatek_nadg = st.number_input("Dodatek za nadgodzinę (+ zł):", value=30.0)
 
-miesiace = ["Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec", "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"]
-wybrany_m = st.selectbox("Wybierz miesiąc:", miesiace, index=datetime.now().month-1)
+# --- GŁÓWNY PROGRAM ---
+st.title("💰 Kalkulator Wypłaty")
 
-h_etat = get_working_hours(wybrany_rok, miesiace.index(wybrany_m)+1)
+tab1, tab2 = st.tabs(["🧮 Obliczenia", "📊 Historia"])
 
-c1, c2 = st.columns(2)
-h_p = c1.number_input("Godziny standardowe:", value=float(h_etat))
-h_n = c1.number_input("Nadgodziny:", value=0.0)
-h_s = c2.number_input("Soboty (+50%):", value=0.0)
-h_ni = c2.number_input("Niedziele (+100%):", value=0.0)
+miesiace = ["Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec", 
+            "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"]
 
-total = (h_p * stawka_p) + (h_n * (stawka_p + dodatek_n)) + \
-        (h_s * stawka_p * 1.5) + (h_ni * stawka_p * 2.0)
+with tab1:
+    wybrany_m_nazwa = st.selectbox("Wybierz miesiąc:", miesiace, index=datetime.now().month-1)
+    m_idx = miesiace.index(wybrany_m_nazwa) + 1
+    
+    # Tu dzieje się poprawna magia liczenia godzin
+    h_etat = get_working_hours_pl(wybrany_rok, m_idx)
+    
+    st.info(f"Wymiar czasu pracy w {wybrany_m_nazwa} {wybrany_rok} to: **{h_etat}h**")
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        h_p = st.number_input("Godziny standardowe:", value=float(h_etat))
+        h_n = st.number_input("Nadgodziny:", value=0.0)
+    with c2:
+        h_s = st.number_input("Soboty (+50%):", value=0.0)
+        h_ni = st.number_input("Niedziele (+100%):", value=0.0)
 
-st.metric("Twoja wypłata", f"{total:.2f} zł")
+    # Obliczenia
+    val_p = h_p * stawka_podst
+    val_n = h_n * (stawka_podst + dodatek_nadg)
+    val_s = h_s * (stawka_podst * 1.5)
+    val_ni = h_ni * (stawka_podst * 2.0)
+    total = val_p + val_n + val_s + val_ni
 
-# --- KROK 3: AKTUALIZACJA I POBIERANIE ---
-if st.button("Dodaj ten miesiąc do tabeli"):
-    nowy_wpis = pd.DataFrame([{"Rok": wybrany_rok, "Miesiąc": wybrany_m, "Suma_Brutto": total}])
-    # Usuń duplikat jeśli ten miesiąc już był
-    df_history = df_history[~((df_history["Rok"] == wybrany_rok) & (df_history["Miesiąc"] == wybrany_m))]
-    df_history = pd.concat([df_history, nowy_wpis], ignore_index=True)
-    st.session_state['data'] = df_history
-    st.success("Dodano do widoku poniżej!")
+    st.divider()
+    st.metric("Suma do wypłaty (Brutto)", f"{total:,.2f} zł")
 
-st.divider()
-st.subheader("3. Twoja aktualna tabela")
+    if st.button("💾 Zapisz wynik (Pobierz plik)"):
+        # W Streamlit Cloud musimy pobrać plik, by go nie stracić
+        df = load_data()
+        df = df[~((df["Rok"] == wybrany_rok) & (df["Miesiąc"] == wybrany_m_nazwa))]
+        nowy = pd.DataFrame([{"Rok": wybrany_rok, "Miesiąc": wybrany_m_nazwa, "Zarobek": total}])
+        df = pd.concat([df, nowy], ignore_index=True)
+        
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Pobierz zaktualizowany plik historii", csv, "zarobki.csv", "text/csv")
 
-if 'data' in st.session_state:
-    display_df = st.session_state['data']
-else:
-    display_df = df_history
-
-st.dataframe(display_df, use_container_width=True)
-
-# Przycisk do pobierania gotowego pliku
-csv = display_df.to_csv(index=False).encode('utf-8')
-st.download_button(
-    label="📥 Pobierz i zapisz plik na telefonie",
-    data=csv,
-    file_name=f"zarobki_historia.csv",
-    mime="text/csv",
-)
+with tab2:
+    st.subheader("Twoje statystyki")
+    uploaded_file = st.file_uploader("Wgraj swój plik 'zarobki.csv', aby zobaczyć historię:", type="csv")
+    
+    if uploaded_file:
+        df_hist = pd.read_csv(uploaded_file)
+        widok = df_hist[df_hist["Rok"] == wybrany_rok]
+        st.dataframe(widok, use_container_width=True)
+        st.bar_chart(widok.set_index("Miesiąc")["Zarobek"])
