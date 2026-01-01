@@ -78,7 +78,7 @@ with tab2:
 # --- TAB 3: SKANOWANIE (OCR) ---
 with tab3:
     st.subheader("Automatyczna analiza grafiku")
-    st.write(f"Skanowanie dla: {wybrany_m_nazwa} {wybrany_rok}")
+    st.write(f"Skanowanie dla: **{wybrany_m_nazwa} {wybrany_rok}**")
     
     plik_foto = st.file_uploader("Wgraj zdjęcie (kolumna 'Ilość godzin'):", type=['jpg', 'jpeg', 'png'])
     
@@ -88,9 +88,76 @@ with tab3:
         st.image(image, caption="Twój grafik", width=300)
         
         if st.button("🚀 Analizuj i rozlicz"):
-            with st.spinner("Szukam kolumny i liczę..."):
+            with st.spinner("Przetwarzanie obrazu... to może potrwać chwilę"):
                 wynik = reader.readtext(img_array)
                 
-                # Logika szukania nagłówka "ilość godzin" i przypisywania do dni...
-                # (Tutaj znajduje się kod z poprzedniej odpowiedzi)
-                st.success("Analiza zakończona! Wyniki możesz przepisać do zakładki Obliczenia.")
+                header_x = None
+                # 1. Szukamy nagłówka "Ilość godzin"
+                for (bbox, tekst, prob) in wynik:
+                    t = tekst.lower()
+                    if "ilo" in t or "godz" in t:
+                        header_x = (bbox[0][0] + bbox[1][0]) / 2
+                        st.write(f"📍 Znaleziono kolumnę: '{tekst}'")
+                        break
+
+                if not header_x:
+                    st.error("Nie znaleziono nagłówka 'Ilość godzin'. Upewnij się, że jest widoczny na zdjęciu.")
+                else:
+                    # 2. Szukamy liczb w tej samej linii pionowej (pod nagłówkiem)
+                    data_points = []
+                    for (bbox, tekst, prob) in wynik:
+                        # Usuwamy zbędne znaki, zostawiamy tylko cyfry
+                        czysty_tekst = "".join(filter(str.isdigit, tekst))
+                        if czysty_tekst:
+                            liczba = int(czysty_tekst)
+                            x_center = (bbox[0][0] + bbox[1][0]) / 2
+                            y_center = (bbox[0][1] + bbox[2][1]) / 2
+                            
+                            # Jeśli liczba jest w pionie pod nagłówkiem (margines 60px)
+                            if abs(x_center - header_x) < 60:
+                                if 1 <= liczba <= 24: # Filtrujemy sensowne godziny pracy
+                                    data_points.append({'y': y_center, 'val': liczba})
+
+                    # Sortujemy od góry do dołu (wg osi Y)
+                    data_points.sort(key=lambda x: x['y'])
+
+                    # 3. Rozliczanie zgodnie z kalendarzem
+                    pl_holidays = holidays.Poland(years=wybrany_rok)
+                    dni_w_miesiacu = calendar.monthrange(wybrany_rok, m_idx)[1]
+                    
+                    wyniki = {"std": 0.0, "nad": 0.0, "sob": 0.0, "nie": 0.0}
+
+                    # Przypisujemy odczytane liczby do kolejnych dni (1, 2, 3...)
+                    for i, point in enumerate(data_points[:dni_w_miesiacu]):
+                        dzien_nr = i + 1
+                        h = float(point['val'])
+                        curr_date = date(wybrany_rok, m_idx, dzien_nr)
+                        weekday = curr_date.weekday() # 0=Pon, 5=Sob, 6=Nie
+
+                        if weekday == 5: # Sobota
+                            wyniki["sob"] += h
+                        elif weekday == 6 or curr_date in pl_holidays: # Niedziela/Święto
+                            wyniki["nie"] += h
+                        else: # Dzień roboczy
+                            if h > 8:
+                                wyniki["std"] += 8
+                                wyniki["nad"] += (h - 8)
+                            else:
+                                wyniki["std"] += h
+
+                    # --- WYŚWIETLANIE WYNIKÓW ---
+                    st.success("✅ Analiza zakończona!")
+                    
+                    st.markdown("### Odczytane wartości:")
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Standard", f"{wyniki['std']}h")
+                    c2.metric("Nadgodziny", f"{wyniki['nad']}h")
+                    c3.metric("Soboty", f"{wyniki['sob']}h")
+                    c4.metric("Nd/Święta", f"{wyniki['nie']}h")
+                    
+                    st.info("💡 Przepisz te wartości do zakładki 'Obliczenia', aby zobaczyć kwotę brutto.")
+                    
+                    # Opcjonalnie: podgląd tego, co program "widział" dzień po dniu
+                    with st.expander("Zobacz szczegółowy wykaz dni"):
+                        for i, p in enumerate(data_points[:dni_w_miesiacu]):
+                            st.write(f"Dzień {i+1}: {p['val']}h")
