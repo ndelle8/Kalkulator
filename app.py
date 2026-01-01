@@ -1,97 +1,100 @@
 import streamlit as st
-import pandas as pd
+import easyocr
+import numpy as np
 import holidays
-from datetime import datetime, date
 import calendar
-import os
+from datetime import date
+from PIL import Image
 
-# --- KONFIGURACJA ---
-st.set_page_config(page_title="Kalkulator Zarobków PRO", page_icon="💰")
-DB_FILE = "historia_zarobkow.csv"
+@st.cache_resource
+def load_ocr():
+    return easyocr.Reader(['pl'])
 
-# Funkcja licząca dokładne godziny robocze w Polsce (z uwzględnieniem świąt)
-def get_working_hours_pl(year, month):
-    pl_holidays = holidays.Poland(years=year)
-    working_days = 0
+reader = load_ocr()
+
+# --- ZAKŁADKA SKANOWANIA ---
+tab1, tab2, tab3 = st.tabs(["🧮 Obliczenia", "📊 Historia", "📸 Skanuj Grafik"])
+
+with tab3:
+    st.subheader("Inteligentne skanowanie grafiku")
+    st.info(f"Analizuję grafik dla: **{wybrany_m_nazwa} {wybrany_rok}**")
     
-    # Pobierz liczbę dni w miesiącu
-    num_days = calendar.monthrange(year, month)[1]
+    plik_foto = st.file_uploader("Wgraj zdjęcie (dni 1-31 w pionie, kolumna 'Ilość godzin'):", type=['jpg', 'jpeg', 'png'])
     
-    for day in range(1, num_days + 1):
-        curr_date = date(year, month, day)
-        # Jeśli to dzień roboczy (0-4 to Pon-Pt) i NIE jest to święto
-        if curr_date.weekday() < 5 and curr_date not in pl_holidays:
-            working_days += 1
-            
-    return working_days * 8
-
-# Funkcja ładowania/zapisu danych
-def load_data():
-    if os.path.exists(DB_FILE):
-        return pd.read_csv(DB_FILE)
-    return pd.DataFrame(columns=["Rok", "Miesiąc", "Zarobek"])
-
-# --- BOCZNY PANEL ---
-with st.sidebar:
-    st.header("⚙️ Ustawienia")
-    wybrany_rok = st.selectbox("Wybierz rok:", [2024, 2025, 2026, 2027], index=1)
-    
-    st.divider()
-    st.subheader("Stawki")
-    stawka_podst = st.number_input("Stawka podstawowa (zł/h):", value=20.0)
-    dodatek_nadg = st.number_input("Dodatek za nadgodzinę (+ zł):", value=30.0)
-
-# --- GŁÓWNY PROGRAM ---
-st.title("💰 Kalkulator Wypłaty")
-
-tab1, tab2 = st.tabs(["🧮 Obliczenia", "📊 Historia"])
-
-miesiace = ["Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec", 
-            "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"]
-
-with tab1:
-    wybrany_m_nazwa = st.selectbox("Wybierz miesiąc:", miesiace, index=datetime.now().month-1)
-    m_idx = miesiace.index(wybrany_m_nazwa) + 1
-    
-    # Tu dzieje się poprawna magia liczenia godzin
-    h_etat = get_working_hours_pl(wybrany_rok, m_idx)
-    
-    st.info(f"Wymiar czasu pracy w {wybrany_m_nazwa} {wybrany_rok} to: **{h_etat}h**")
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        h_p = st.number_input("Godziny standardowe:", value=float(h_etat))
-        h_n = st.number_input("Nadgodziny:", value=0.0)
-    with c2:
-        h_s = st.number_input("Soboty (+50%):", value=0.0)
-        h_ni = st.number_input("Niedziele (+100%):", value=0.0)
-
-    # Obliczenia
-    val_p = h_p * stawka_podst
-    val_n = h_n * (stawka_podst + dodatek_nadg)
-    val_s = h_s * (stawka_podst * 1.5)
-    val_ni = h_ni * (stawka_podst * 2.0)
-    total = val_p + val_n + val_s + val_ni
-
-    st.divider()
-    st.metric("Suma do wypłaty (Brutto)", f"{total:,.2f} zł")
-
-    if st.button("💾 Zapisz wynik (Pobierz plik)"):
-        # W Streamlit Cloud musimy pobrać plik, by go nie stracić
-        df = load_data()
-        df = df[~((df["Rok"] == wybrany_rok) & (df["Miesiąc"] == wybrany_m_nazwa))]
-        nowy = pd.DataFrame([{"Rok": wybrany_rok, "Miesiąc": wybrany_m_nazwa, "Zarobek": total}])
-        df = pd.concat([df, nowy], ignore_index=True)
+    if plik_foto:
+        image = Image.open(plik_foto)
+        img_array = np.array(image)
+        st.image(image, caption="Twój grafik", width=400)
         
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Pobierz zaktualizowany plik historii", csv, "zarobki.csv", "text/csv")
+        if st.button("🚀 Analizuj i rozlicz godziny"):
+            with st.spinner("Przetwarzanie obrazu i kalendarza..."):
+                wynik = reader.readtext(img_array)
+                
+                # 1. Znajdź pozycję nagłówka "ilość godzin"
+                header_x = None
+                for (bbox, tekst, prob) in wynik:
+                    t = tekst.lower()
+                    if "ilo" in t or "godz" in t:
+                        header_x = (bbox[0][0] + bbox[1][0]) / 2
+                        break
 
-with tab2:
-    st.subheader("Twoje statystyki")
-    uploaded_file = st.file_uploader("Wgraj swój plik 'zarobki.csv', aby zobaczyć historię:", type="csv")
-    
-    if uploaded_file:
-        df_hist = pd.read_csv(uploaded_file)
-        widok = df_hist[df_hist["Rok"] == wybrany_rok]
-        st.dataframe(widok, use_container_width=True)
-        st.bar_chart(widok.set_index("Miesiąc")["Zarobek"])
+                if not header_x:
+                    st.error("Nie znalazłem nagłówka 'Ilość godzin'. Upewnij się, że jest wyraźny.")
+                else:
+                    # 2. Zbierz wszystkie liczby w tej kolumnie wraz z ich pozycją Y
+                    data_points = []
+                    for (bbox, tekst, prob) in wynik:
+                        czysty_tekst = "".join(filter(str.isdigit, tekst))
+                        if czysty_tekst:
+                            val = int(czysty_tekst)
+                            x_center = (bbox[0][0] + bbox[1][0]) / 2
+                            y_center = (bbox[0][1] + bbox[2][1]) / 2
+                            
+                            if abs(x_center - header_x) < 60: # Margines kolumny
+                                if 1 <= val <= 24: # Filtrujemy sensowne godziny
+                                    data_points.append({'y': y_center, 'val': val})
+
+                    # Sortujemy odczyty od góry do dołu (wg osi Y)
+                    data_points.sort(key=lambda x: x['y'])
+                    
+                    # 3. Przypisz odczyty do dni miesiąca (1, 2, 3...)
+                    # Zakładamy, że pierwszy odczyt to dzień 1, drugi to 2 itd.
+                    # Dla pewności sprawdzamy ile dni ma dany miesiąc
+                    dni_w_miesiacu = calendar.monthrange(wybrany_rok, m_idx)[1]
+                    pl_holidays = holidays.Poland(years=wybrany_rok)
+                    
+                    wyniki_dni = {
+                        "standardowe": 0.0,
+                        "nadgodziny": 0.0,
+                        "soboty": 0.0,
+                        "niedziele_swieta": 0.0
+                    }
+
+                    for i, point in enumerate(data_points[:dni_w_miesiacu]):
+                        dzien_nr = i + 1
+                        h = float(point['val'])
+                        curr_date = date(wybrany_rok, m_idx, dzien_nr)
+                        weekday = curr_date.weekday() # 0=Pon, 5=Sob, 6=Nie
+                        
+                        # LOGIKA ROZLICZANIA:
+                        if weekday == 5: # Sobota
+                            wyniki_dni["soboty"] += h
+                        elif weekday == 6 or curr_date in pl_holidays: # Niedziela lub Święto
+                            wyniki_dni["niedziele_swieta"] += h
+                        else: # Dzień roboczy
+                            if h > 8:
+                                wyniki_dni["standardowe"] += 8
+                                wyniki_dni["nadgodziny"] += (h - 8)
+                            else:
+                                wyniki_dni["standardowe"] += h
+
+                    # 4. Wyświetlenie wyników
+                    st.success("Analiza zakończona!")
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Standard", wyniki_dni["standardowe"])
+                    c2.metric("Nadgodziny", wyniki_dni["nadgodziny"])
+                    c3.metric("Soboty", wyniki_dni["soboty"])
+                    c4.metric("Nd/Święta", wyniki_dni["niedziele_swieta"])
+                    
+                    st.session_state['scanned_hours'] = wyniki_dni
+                    st.info("💡 Dane zostały przygotowane. Możesz teraz wrócić do pierwszej zakładki.")
