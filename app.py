@@ -8,29 +8,19 @@ import calendar
 from datetime import date, datetime
 from PIL import Image, ImageOps
 
-# --- 1. KONFIGURACJA AI (AUTOMATYCZNE WYKRYWANIE MODELU) ---
+# --- 1. KONFIGURACJA AI (DYNAMICZNE WYKRYWANIE) ---
 @st.cache_resource
 def get_best_model():
-    """Pobiera listę modeli z API i wybiera pierwszy działający Flash."""
     try:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        # Listujemy wszystkie modele dostępne dla Twojego klucza
-        models = genai.list_models()
-        available_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
-        
-        # Szukamy modelu Flash 1.5 w różnych wersjach
-        for m_name in available_models:
-            if "1.5-flash" in m_name:
-                return genai.GenerativeModel(m_name), m_name
-        
-        # Jeśli nie ma 1.5, bierzemy jakikolwiek Flash
-        for m_name in available_models:
-            if "flash" in m_name:
-                return genai.GenerativeModel(m_name), m_name
-        
+        available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        for m_name in available:
+            if "1.5-flash" in m_name: return genai.GenerativeModel(m_name), m_name
+        for m_name in available:
+            if "flash" in m_name: return genai.GenerativeModel(m_name), m_name
         return None, None
     except Exception as e:
-        st.error(f"Problem z połączeniem z Google API: {e}")
+        st.error(f"Błąd połączenia z API: {e}")
         return None, None
 
 model, active_model_name = get_best_model()
@@ -76,15 +66,13 @@ def save_to_excel(new_data):
     df.to_excel(DB_FILE, index=False)
     return df
 
-# --- 4. INTERFEJS ---
+# --- 4. INTERFEJS UŻYTKOWNIKA ---
 st.set_page_config(page_title="Kalkulator czasu pracy", layout="wide")
 
 with st.sidebar:
     st.header("⚙️ Ustawienia")
-    cur_yr = datetime.now().year
-    lata = list(range(2024, cur_yr + 11))
-    rok = st.selectbox("Rok:", lata, index=lata.index(cur_yr))
-    
+    lata = list(range(2024, datetime.now().year + 11))
+    rok = st.selectbox("Rok:", lata, index=lata.index(datetime.now().year))
     m_list = ["Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec", 
               "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"]
     m_nazwa = st.selectbox("Miesiąc:", m_list, index=datetime.now().month-1)
@@ -94,60 +82,70 @@ with st.sidebar:
 
 st.title("Kalkulator czasu pracy")
 
-if active_model_name:
-    st.caption(f"Status: Połączono z silnikiem `{active_model_name}`")
-
 norma_godzin, lista_swiat = get_working_info(rok, m_idx)
 tab1, tab2 = st.tabs(["🧮 Rozliczenie", "📊 Archiwum"])
 
 with tab1:
-    with st.expander(f"📅 Norma i informacje: {m_nazwa} {rok}"):
-        st.write(f"Wymiar czasu pracy: **{norma_godzin} h**")
+    with st.expander(f"📅 Norma dla {m_nazwa} {rok}"):
+        st.write(f"Wymiar: **{norma_godzin} h**")
         if lista_swiat:
             for s in lista_swiat: st.write(f"• {s}")
 
     plik = st.file_uploader("Zrób zdjęcie lub wgraj grafik:", type=['jpg', 'jpeg', 'png'])
     
     if plik:
-        # Korekta zdjęcia (ważne dla telefonów)
-        img = Image.open(plik)
-        img = ImageOps.exif_transpose(img)
-        st.image(img, width=300, caption="Podgląd grafiku")
+        # Obróbka obrazu dla telefonu
+        raw_img = Image.open(plik)
+        img = ImageOps.exif_transpose(raw_img) # Fix rotacji
+        img.thumbnail((1200, 1200)) # Optymalizacja rozmiaru
+        st.image(img, width=350, caption="Zdjęcie po korekcie orientacji")
         
         if st.button("🚀 ANALIZUJ GRAFIK"):
             if not model:
-                st.error("Błąd: Nie znaleziono aktywnego modelu AI dla Twojego klucza.")
+                st.error("Model AI nie został poprawnie zainicjowany.")
             else:
-                with st.spinner("AI analizuje pismo odręczne i urlopy..."):
+                with st.spinner("AI analizuje tabelę runda po rundzie..."):
                     try:
-                        prompt = """To jest grafik pracy. Zlokalizuj kolumnę 'Ilość godzin'. 
-                        Wypisz 31 wartości oddzielonych przecinkami dla dni 1-31.
-                        ZASADY:
-                        - Jeśli jest liczba (np. 8, 12), wpisz ją.
-                        - Jeśli widzisz 'URL', 'Urlop', 'URZ', wpisz 'U'.
-                        - Jeśli puste lub kreska, wpisz '0'."""
+                        # Nowy, bardziej precyzyjny prompt
+                        prompt = """Jesteś precyzyjnym systemem odczytu tabel. Twoim zadaniem jest odczytanie kolumny 'Ilość godzin' dla każdego dnia miesiąca (1-31).
+                        1. Zlokalizuj kolumnę 'LP' i kolumnę 'Ilość godzin'.
+                        2. Dla każdego dnia od 1 do 31 podaj wartość.
+                        3. ZASADY:
+                           - Liczba (np. 8, 10.5) -> zapisz ją.
+                           - 'URL', 'Urlop', 'URZ', 'U' -> zapisz 'U'.
+                           - Puste, kreska, podpis -> zapisz '0'.
+                        ZWRÓĆ DANE DOKŁADNIE W TYM FORMACIE:
+                        1: [wartość], 2: [wartość], ..., 31: [wartość]"""
                         
                         response = model.generate_content([prompt, img])
-                        items = response.text.replace(" ", "").split(",")
+                        text_res = response.text
                         
-                        p_hours, p_url = [], []
-                        for i, item in enumerate(items[:31]):
-                            if 'U' in item.upper():
-                                p_hours.append(8.0)
-                                p_url.append(i + 1)
+                        # Ekstrakcja danych mapowana na konkretne dni
+                        day_map = {}
+                        pairs = re.findall(r"(\d+):\s*([0-9.Uu]+)", text_res)
+                        for day, val in pairs:
+                            day_num = int(day)
+                            if val.upper() == 'U':
+                                day_map[day_num] = ('U', 8.0)
                             else:
-                                n = re.findall(r"(\d+(?:\.\d+)?)", item)
-                                p_hours.append(float(n[0]) if n else 0.0)
+                                try: day_map[day_num] = ('H', float(val))
+                                except: day_map[day_num] = ('H', 0.0)
                         
-                        while len(p_hours) < 31: p_hours.append(0.0)
-                        st.session_state['dni_lista'] = p_hours
-                        st.session_state['url_dni'] = p_url
-                        st.success("✅ Odczytano!")
+                        # Budowanie listy końcowej
+                        final_hours = []
+                        final_urlopy = []
+                        for d in range(1, 32):
+                            v_type, v_val = day_map.get(d, ('H', 0.0))
+                            final_hours.append(v_val)
+                            if v_type == 'U': final_urlopy.append(d)
+                            
+                        st.session_state['dni_lista'] = final_hours
+                        st.session_state['url_dni'] = final_urlopy
+                        st.success("✅ Odczyt zakończony sukcesem!")
                     except Exception as e: st.error(f"Błąd analizy: {e}")
 
     if 'dni_lista' in st.session_state:
         num_d = calendar.monthrange(rok, m_idx)[1]
-        
         st.subheader("📝 Korekta i wyniki")
         
         sel_url = st.multiselect(
@@ -164,7 +162,7 @@ with tab1:
             with cols[i % 7]:
                 d_val = 8.0 if d_n in sel_url else st.session_state['dni_lista'][i]
                 v = st.number_input(f"{d_n} {get_day_name(rok, m_idx, d_n)}", 
-                                    value=float(d_val), key=f"f_{i}", step=0.5)
+                                    value=float(d_val), key=f"k_{i}", step=0.5)
                 popr.append(v)
         
         suma_h = sum(popr)
@@ -174,20 +172,20 @@ with tab1:
         st.divider()
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Suma godzin", f"{suma_h} h")
-        c2.metric("Norma etatu", f"{norma_godzin} h")
-        c3.metric("Nadgodziny", f"{nadgodziny} h", delta=nadgodziny if nadgodziny > 0 else None)
-        c4.metric("Dni urlopu", f"{len(sel_url)}")
+        c2.metric("Norma", f"{norma_godzin} h")
+        c3.metric("Nadgodziny", f"{nadgodziny} h")
+        c4.metric("Urlopy", len(sel_url))
         
         st.success(f"### 💰 Wypłata: **{total_pln:,.2f} zł brutto**")
 
-        if st.button("💾 Zapisz do historii"):
-            res = save_to_excel({
+        if st.button("💾 Zapisz do historii Excel"):
+            save_to_excel({
                 "Rok": rok, "Miesiąc": m_nazwa, "Godziny Suma": suma_h,
                 "Norma": norma_godzin, "Nadgodziny": nadgodziny,
                 "Stawka": stawka, "Dni Urlopu": len(sel_url), "Suma PLN": round(total_pln, 2)
             })
             st.balloons()
-            st.success("Zapisano pomyślnie!")
+            st.success("Dane zapisane!")
 
 with tab2:
     df_db = load_data()
@@ -196,14 +194,6 @@ with tab2:
         if not df_rok.empty:
             df_rok['M_Idx'] = df_rok['Miesiąc'].apply(lambda x: m_list.index(x))
             df_rok = df_rok.sort_values('M_Idx')
-            
-            st.subheader(f"Zarobki w roku {rok}")
             st.bar_chart(df_rok, x="Miesiąc", y="Suma PLN")
             st.metric("Suma roczna", f"{df_rok['Suma PLN'].sum():,.2f} zł")
-            st.metric("Wykorzystany urlop", f"{df_rok['Dni Urlopu'].sum()} dni")
             st.dataframe(df_rok[["Miesiąc", "Godziny Suma", "Nadgodziny", "Dni Urlopu", "Suma PLN"]], use_container_width=True)
-            
-            with open(DB_FILE, "rb") as f:
-                st.download_button("📥 Pobierz bazę Excel", data=f, file_name=f"zarobki_{rok}.xlsx")
-    else:
-        st.info("Brak wpisów w historii.")
