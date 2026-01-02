@@ -10,25 +10,17 @@ import openpyxl
 from openpyxl.drawing.image import Image as OpenpyxlImage
 from io import BytesIO
 
-# --- 1. INTELIGENTNA KONFIGURACJA AI (Fix błędu 404) ---
+# --- 1. KONFIGURACJA AI ---
 @st.cache_resource
 def get_working_model():
     try:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        # Pobieramy listę modeli dostępnych dla Twojego klucza
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # Próbujemy znaleźć najlepszy dostępny wariant Flash
         priorities = ["models/gemini-1.5-flash", "models/gemini-1.5-flash-latest", "gemini-1.5-flash"]
         for p in priorities:
-            if p in available_models:
-                return genai.GenerativeModel(p), p
-        
-        # Fallback do jakiegokolwiek modelu Flash
+            if p in available_models: return genai.GenerativeModel(p), p
         fallbacks = [m for m in available_models if "flash" in m]
-        if fallbacks:
-            return genai.GenerativeModel(fallbacks[0]), fallbacks[0]
-        
+        if fallbacks: return genai.GenerativeModel(fallbacks[0]), fallbacks[0]
         return None, None
     except Exception as e:
         st.error(f"Klucz API nie odpowiada: {e}")
@@ -67,14 +59,21 @@ def create_excel_in_memory(df_final, pil_image=None):
         row_idx = ws.max_row
         
         img_temp = pil_image.copy()
-        img_temp.thumbnail((150, 200))
+        img_temp.thumbnail((1600, 2000)) # Wysoka jakość do powiększania
         img_buffer = BytesIO()
         img_temp.save(img_buffer, format="PNG")
         
         img_to_excel = OpenpyxlImage(img_buffer)
+        
+        # Ustawiamy miniaturkę
+        img_to_excel.width = 80
+        img_to_excel.height = 105
+        
         ws.add_image(img_to_excel, f'I{row_idx}')
-        ws.row_dimensions[row_idx].height = 150
-        ws.column_dimensions['I'].width = 25
+        
+        # Ustawiamy wysokość wiersza, aby arkusz był zgrabny
+        ws.row_dimensions[row_idx].height = 80
+        ws.column_dimensions['I'].width = 12
         
         final_out = BytesIO()
         wb.save(final_out)
@@ -86,7 +85,7 @@ st.set_page_config(page_title="Kalkulator czasu pracy", layout="wide")
 
 with st.sidebar:
     st.title("📂 Zarządzanie Plikiem")
-    uploaded_file = st.file_uploader("Wgraj swoją bazę (.xlsx), aby dopisać dane:", type="xlsx")
+    uploaded_file = st.file_uploader("Wgraj swoją bazę (.xlsx):", type="xlsx")
     
     st.divider()
     st.header("⚙️ Ustawienia")
@@ -94,24 +93,18 @@ with st.sidebar:
     lata = list(range(2024, current_year + 11))
     rok = st.selectbox("Rok:", lata, index=lata.index(current_year))
     
-    m_list = ["Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec", 
-              "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"]
+    m_list = ["Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec", "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"]
     m_nazwa = st.selectbox("Miesiąc:", m_list, index=datetime.now().month-1)
     m_idx = m_list.index(m_nazwa) + 1
     stawka = st.number_input("Stawka podstawowa (zł/h):", value=25.0)
     dodatek = st.number_input("Dodatek za nadgodziny (zł):", value=15.0)
 
 st.title("Kalkulator czasu pracy")
-if model_name: st.caption(f"Połączono z modelem: `{model_name}`")
 
 norma_godzin, lista_swiat = get_working_info(rok, m_idx)
 tab1, tab2 = st.tabs(["🧮 Rozliczenie i Skanowanie", "📊 Archiwum i Eksport"])
 
 with tab1:
-    with st.expander(f"📅 Norma i święta: {m_nazwa} {rok}"):
-        st.write(f"Wymiar czasu pracy: **{norma_godzin} h**")
-        for s in lista_swiat: st.write(f"• {s}")
-
     plik = st.file_uploader("Wgraj zdjęcie grafiku:", type=['jpg', 'jpeg', 'png'])
     
     if plik:
@@ -120,20 +113,21 @@ with tab1:
         st.image(img, width=300)
         
         if st.button("🚀 SKANUJ GRAFIK"):
-            if not model:
-                st.error("Błąd AI: Nie udało się zainicjować modelu. Sprawdź klucz API.")
-            else:
-                with st.spinner("AI analizuje pismo odręczne i urlopy..."):
+            if model:
+                with st.spinner("AI analizuje grafik..."):
                     try:
-                        prompt = "Odczytaj 4. kolumnę (Ilość godzin). Zwróć dane w formacie: 1: [wart], 2: [wart]... Dla urlopów wpisz 'U'."
+                        prompt = "Odczytaj 4. kolumnę (Ilość godzin). Zwróć dane: 1:[wart], 2:[wart]... Użyj 'U' dla urlopów."
                         response = model.generate_content([prompt, img])
                         pairs = re.findall(r"(\d+):\s*([0-9.Uu]+)", response.text)
                         
-                        d_list, u_list = [0.0]*31, []
+                        d_list = [0.0]*31
+                        u_list = []
                         for d, v in pairs:
                             dn = int(d)
                             if dn <= 31:
-                                if v.upper() == 'U': d_list[dn-1] = 8.0; u_list.append(dn)
+                                if v.upper() == 'U':
+                                    d_list[dn-1] = 8.0
+                                    u_list.append(dn)
                                 else:
                                     try: d_list[dn-1] = float(v)
                                     except: pass
@@ -162,10 +156,7 @@ with tab1:
         total_pln = (suma_h * stawka) + (nadgodziny * dodatek)
         
         st.divider()
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Suma wszystkich godzin", f"{suma_h} h")
-        c2.metric("Nadgodziny (Bilans)", f"{nadgodziny} h")
-        c3.metric("Wypłata BRUTTO", f"{total_pln:,.2f} zł")
+        st.success(f"### 💰 Wypłata BRUTTO: **{total_pln:,.2f} zł**")
 
         if st.button("➕ Przygotuj plik do pobrania"):
             new_row = {
@@ -179,13 +170,10 @@ with tab1:
             df_final = pd.concat([df_base, pd.DataFrame([new_row])], ignore_index=True)
             
             st.session_state['excel_ready'] = create_excel_in_memory(df_final, st.session_state.get('last_img'))
-            st.success("Gotowe! Przejdź do zakładki 'Archiwum i Eksport'.")
+            st.success("Gotowe! Pobierz plik w zakładce 'Archiwum i Eksport'.")
 
 with tab2:
     if 'excel_ready' in st.session_state:
         st.download_button("📥 POBIERZ ZAKTUALIZOWANY EXCEL", data=st.session_state['excel_ready'], file_name=f"zarobki_{rok}_{m_nazwa}.xlsx")
     elif uploaded_file:
-        st.write("Podgląd Twojego wgranego pliku:")
         st.dataframe(pd.read_excel(uploaded_file), use_container_width=True)
-    else:
-        st.info("Wgraj plik lub przygotuj nowe rozliczenie.")
