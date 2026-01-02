@@ -11,8 +11,8 @@ from PIL import Image
 # Klucz musi być w Secrets jako: GOOGLE_API_KEY = "..."
 try:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    # Zmieniono nazwę na standardową 'gemini-1.5-flash'
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # Zmieniono na 'gemini-1.5-flash-latest' - najbardziej odporna na błędy 404 nazwa
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
 except Exception as e:
     st.error(f"Problem z konfiguracją Google AI: {e}")
 
@@ -24,6 +24,7 @@ def calculate_wages(hours_list, year, month, rate, bonus):
     for i, h in enumerate(hours_list):
         if h <= 0: continue
         try:
+            # i to indeks (0-30), więc i+1 to dzień miesiąca
             curr_d = date(year, month, i + 1)
             wday = curr_d.weekday()
             # 5 = Sobota, 6 = Niedziela
@@ -34,7 +35,9 @@ def calculate_wages(hours_list, year, month, rate, bonus):
                     stats["std"] += 8
                     stats["nad"] += (h - 8)
                 else: stats["std"] += h
-        except: continue
+        except ValueError:
+            # Obsługa miesięcy krótszych niż 31 dni
+            continue
     return stats
 
 # --- 3. INTERFEJS ---
@@ -64,20 +67,23 @@ with tab1:
         if st.button("🔍 Odczytaj grafik przez AI"):
             with st.spinner("Gemini analizuje pismo odręczne..."):
                 try:
-                    # Bardzo precyzyjny prompt, aby AI nie "gadało" zbędnych rzeczy
-                    prompt = """Jesteś ekspertem od odczytywania tabel. To jest zdjęcie grafiku pracy.
-                    1. Znajdź kolumnę 'Ilość godzin' (zazwyczaj 4. kolumna).
-                    2. Odczytaj wartości dla dni 1-31.
-                    3. Zwróć dane w formacie: tylko liczby oddzielone przecinkami (np. 8,8,0,10...).
-                    4. Jeśli pole jest puste, zawiera kreskę '-' lub tekst (np. URZ, CH), wpisz 0."""
+                    # Prompt z instrukcją "Zero-Shot"
+                    prompt = """Znajdź kolumnę 'Ilość godzin' na zdjęciu. 
+                    Odczytaj wartości dla dni 1-31. 
+                    Zwróć dane TYLKO jako listę liczb oddzielonych przecinkami.
+                    Dla dni wolnych lub pustych wpisz 0.
+                    Przykład: 8,8,0,0,12,8..."""
                     
                     response = model.generate_content([prompt, img])
                     
-                    # Parsowanie wyników - szukamy liczb w tekście odpowiedzi
+                    # Oczyszczanie tekstu z ewentualnych komentarzy AI
                     raw_text = response.text
-                    numbers = re.findall(r"[-+]?\d*\.\d+|\d+", raw_text)
+                    # Wyciągamy tylko to, co wygląda na liczby (całkowite lub z kropką)
+                    numbers = re.findall(r"(\d+(?:\.\d+)?)", raw_text)
                     
                     parsed_numbers = [float(x) for x in numbers]
+                    
+                    # Zapewnienie, że mamy dokładnie 31 dni (dopełnienie zerami)
                     while len(parsed_numbers) < 31:
                         parsed_numbers.append(0.0)
                         
@@ -85,23 +91,21 @@ with tab1:
                     st.success("✅ Grafik odczytany pomyślnie!")
                 except Exception as e:
                     st.error(f"Błąd analizy: {e}")
-                    st.info("Spróbuj zmienić nazwę modelu w kodzie na 'gemini-pro-vision', jeśli ten błąd się powtórzy.")
+                    st.info("Jeśli widzisz błąd 404, sprawdź czy klucz API jest poprawny w Secrets.")
 
     # Sekcja korekty i wyniki
     if 'dni_lista' in st.session_state:
         st.subheader("📝 Sprawdź i popraw odczytane godziny")
         poprawione = []
+        # Wyświetlamy 7 kolumn (jak w kalendarzu)
         cols = st.columns(7)
         for i in range(31):
             with cols[i % 7]:
                 val = st.number_input(f"Dz {i+1}", value=st.session_state['dni_lista'][i], key=f"d_{i}", step=0.5)
                 poprawione.append(val)
         
-        # Wyliczenia końcowe
+        # Wyliczenia
         res = calculate_wages(poprawione, rok, m_idx, stawka, dodatek)
-        
-        # Matematyczne podsumowanie
-        # $$Suma = (h_{std} \cdot stawka) + (h_{nad} \cdot (stawka + dodatek)) + (h_{sob} \cdot stawka \cdot 1.5) + (h_{nie} \cdot stawka \cdot 2.0)$$
         total = (res["std"] * stawka) + (res["nad"] * (stawka + dodatek)) + \
                 (res["sob"] * stawka * 1.5) + (res["nie"] * stawka * 2.0)
         
