@@ -3,3 +3,4 @@ pandas
 holidays
 google-generativeai
 Pillow
+openpyxl
