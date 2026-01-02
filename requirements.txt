@@ -1,7 +1,5 @@
 streamlit
 pandas
 holidays
-easyocr
-opencv-python-headless
-numpy
+google-generativeai
 Pillow
