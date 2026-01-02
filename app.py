@@ -56,93 +56,81 @@ with tab1:
             (h_sob * stawka_podst * 1.5) + (h_nie * stawka_podst * 2.0)
     st.metric("Suma do wypłaty (Brutto)", f"{total:,.2f} zł")
 
-# --- TAB 3: SKANOWANIE (LOGIKA 4. KOLUMNY) ---
+# --- TAB 3: SKANOWANIE (WERSJA Z DOSTRAJANIEM) ---
 with tab3:
-    st.subheader("📸 Inteligentne skanowanie 4. kolumny")
-    plik = st.file_uploader("Wgraj zdjęcie wypełnionego grafiku:", type=['jpg', 'jpeg', 'png'])
+    st.subheader("📸 Skaner z ręcznym dostrajaniem kolumny")
+    plik = st.file_uploader("Wgraj zdjęcie grafiku:", type=['jpg', 'jpeg', 'png'])
     
     if plik:
         img_raw = Image.open(plik)
         img_raw = ImageOps.exif_transpose(img_raw)
-        img_raw.thumbnail((1000, 1000)) # Oszczędność RAM
+        img_raw.thumbnail((1000, 1000))
         img_gray = ImageOps.grayscale(img_raw)
         img_gray = ImageOps.autocontrast(img_gray, cutoff=2)
         
-        st.image(img_gray, caption="Obraz przygotowany do analizy", width=500)
+        img_width = np.array(img_gray).shape[1]
+        
+        c_img, c_ctrl = st.columns([2, 1])
+        
+        with c_img:
+            st.image(img_gray, caption="Obraz przygotowany do analizy", width=600)
+            
+        with c_ctrl:
+            st.write("⚙️ **Dostrajanie kolumny**")
+            st.write("Jeśli program czyta złe dane, przesuń suwak:")
+            # Suwak pozwala ręcznie wskazać pozycję kolumny (od 0 do szerokości obrazu)
+            manual_x = st.slider("Pozycja kolumny (X):", 0, img_width, int(img_width * 0.7))
+            margines = st.slider("Szerokość kolumny:", 50, 200, 100)
+            
+            st.info("💡 Wskazówka: Zazwyczaj kolumna 'Ilość godzin' znajduje się w okolicach 70% szerokości kartki.")
 
-        if st.button("🚀 ANALIZUJ KOLUMNĘ 'ILOŚĆ GODZIN'"):
+        if st.button("🚀 ANALIZUJ I PRZELICZ"):
             try:
-                with st.spinner("Lokalizuję kolumny..."):
+                with st.spinner("Przetwarzam pismo odręczne..."):
                     reader = load_ocr()
                     wyniki = reader.readtext(np.array(img_gray))
                 
-                # 1. SZUKANIE NAGŁÓWKÓW I SORTOWANIE
-                naglowki = []
+                # ZBIERANIE LICZB WOKÓŁ WYBRANEGO X
+                dni_temp = []
                 for (bbox, tekst, prob) in wyniki:
-                    y_center = (bbox[0][1] + bbox[2][1]) / 2
-                    # Szukamy tylko w górnej części obrazu (nagłówki)
-                    if y_center < np.array(img_gray).shape[0] * 0.25:
-                        naglowki.append({
-                            'x': (bbox[0][0] + bbox[1][0]) / 2,
-                            'tekst': tekst
-                        })
-                
-                # Sortujemy nagłówki od lewej do prawej
-                naglowki.sort(key=lambda x: x['x'])
-                
-                # Próbujemy znaleźć "Ilość godzin" po tekście LUB po prostu bierzemy 4. nagłówek
-                header_x = None
-                for i, h in enumerate(naglowki):
-                    t = h['tekst'].lower()
-                    if "ilo" in t or "god" in t:
-                        header_x = h['x']
-                        st.success(f"📍 Wykryto kolumnę na podstawie tekstu: '{h['tekst']}'")
-                        break
-                
-                # Fallback: Jeśli OCR źle odczytał tekst, bierzemy 4-ty wykryty blok tekstu od lewej
-                if header_x is None and len(naglowki) >= 4:
-                    header_x = naglowki[3]['x']
-                    st.warning(f"⚠️ Niepewny tekst, celuję w 4. kolumnę od lewej (pozycja x: {int(header_x)})")
+                    x_c = (bbox[0][0] + bbox[1][0]) / 2
+                    y_c = (bbox[0][1] + bbox[2][1]) / 2
+                    
+                    # Czyścimy tekst (OCR myli 8 z B, 0 z O itd.)
+                    t_mod = tekst.upper().replace('O', '0').replace('B', '8').replace('S', '5').replace('G', '6')
+                    cyfry = "".join(filter(str.isdigit, t_mod))
+                    
+                    if cyfry:
+                        val = int(cyfry)
+                        # Szukamy tylko w "tunelu" wyznaczonym przez suwak
+                        if abs(x_c - manual_x) < margines and 1 <= val <= 24:
+                            dni_temp.append({'y': y_c, 'val': val})
 
-                if header_x:
-                    # 2. ZBIERANIE LICZB POD WYZNACZONYM X
-                    dni_temp = []
-                    for (bbox, tekst, prob) in wyniki:
-                        x_c = (bbox[0][0] + bbox[1][0]) / 2
-                        y_c = (bbox[0][1] + bbox[2][1]) / 2
-                        
-                        # Czyścimy tekst i szukamy cyfr
-                        t_mod = tekst.upper().replace('O', '0').replace('B', '8').replace('S', '5')
-                        cyfry = "".join(filter(str.isdigit, t_mod))
-                        
-                        if cyfry:
-                            val = int(cyfry)
-                            # Szukamy w pionowym tunelu o szerokości 120px
-                            if abs(x_c - header_x) < 120 and 1 <= val <= 24:
-                                dni_temp.append({'y': y_c, 'val': val})
-
-                    # Sortujemy od góry do dołu
-                    dni_temp.sort(key=lambda x: x['y'])
-                    st.session_state['dni_lista'] = [d['val'] for d in dni_temp[:31]]
-                    st.success(f"✅ Odczytano {len(st.session_state['dni_lista'])} wartości. Sprawdź je poniżej.")
+                # Sortowanie i rozliczanie
+                dni_temp.sort(key=lambda x: x['y'])
+                st.session_state['dni_lista'] = [d['val'] for d in dni_temp[:31]]
+                
+                if not st.session_state['dni_lista']:
+                    st.error("Nie znaleziono żadnych liczb w wybranym obszarze. Spróbuj przesunąć suwak.")
                 else:
-                    st.error("Nie udało się zlokalizować kolumn. Zrób zdjęcie tak, aby góra tabeli była wyraźna.")
+                    st.success(f"✅ Znaleziono {len(st.session_state['dni_lista'])} wpisów. Sprawdź tabelę poniżej.")
 
             except Exception as e:
                 st.error(f"Błąd: {e}")
 
-        # --- SEKCJA KOREKTY ---
+        # SEKCJA KOREKTY (wyświetla się po analizie)
         if 'dni_lista' in st.session_state:
             st.divider()
+            st.subheader("📝 Sprawdź odczytane wartości")
             poprawione = []
             cols = st.columns(7)
             for i in range(31):
                 with cols[i % 7]:
                     d_val = st.session_state['dni_lista'][i] if i < len(st.session_state['dni_lista']) else 0.0
-                    v = st.number_input(f"Dz {i+1}", value=float(d_val), key=f"korekta_{i}")
+                    v = st.number_input(f"Dz {i+1}", value=float(d_val), key=f"k_manual_{i}")
                     poprawione.append(v)
             
-            if st.button("✅ ZATWIERDŹ I PRZEŚLIJ DO OBLICZEŃ"):
+            if st.button("✅ ZATWIERDŹ DANE"):
                 stats = {"std": 0.0, "nad": 0.0, "sob": 0.0, "nie": 0.0}
                 pl_hols = holidays.Poland(years=wybrany_rok)
                 for i, h in enumerate(poprawione):
@@ -153,8 +141,7 @@ with tab3:
                         elif curr_d.weekday() == 6 or curr_d in pl_hols: stats["nie"] += h
                         else:
                             if h > 8:
-                                stats["std"] += 8
-                                stats["nad"] += (h - 8)
+                                stats["std"] += 8; stats["nad"] += (h - 8)
                             else: stats["std"] += h
                     except: continue
                 
@@ -162,4 +149,4 @@ with tab3:
                 st.session_state['ocr_nad'] = stats["nad"]
                 st.session_state['ocr_sob'] = stats["sob"]
                 st.session_state['ocr_nie'] = stats["nie"]
-                st.success("Dane gotowe! Wróć do zakładki 'Obliczenia'.")
+                st.success("Dane przesłane! Wróć do zakładki 'Obliczenia'.")
