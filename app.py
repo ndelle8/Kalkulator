@@ -7,14 +7,28 @@ from datetime import date, datetime
 import calendar
 from PIL import Image
 
-# --- 1. KONFIGURACJA AI ---
-# Klucz musi być w Secrets jako: GOOGLE_API_KEY = "..."
+# --- 1. KONFIGURACJA AI I AUTO-DETEKCJA ---
+st.set_page_config(page_title="AI Kalkulator Zarobków 2026", layout="wide")
+
 try:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    # Zmieniono na 'gemini-1.5-flash-latest' - najbardziej odporna na błędy 404 nazwa
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    
+    # Funkcja do znalezienia działającego modelu Flash
+    @st.cache_resource
+    def get_flash_model_name():
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # Szukamy najpierw 1.5-flash, potem jakiegokolwiek flash
+        flash_models = [m for m in available_models if "1.5-flash" in m]
+        if not flash_models:
+            flash_models = [m for m in available_models if "flash" in m]
+        
+        return flash_models[0] if flash_models else "models/gemini-1.5-flash"
+
+    model_name = get_flash_model_name()
+    model = genai.GenerativeModel(model_name)
 except Exception as e:
-    st.error(f"Problem z konfiguracją Google AI: {e}")
+    st.error(f"Problem z dostępem do Google AI: {e}")
+    model = None
 
 # --- 2. LOGIKA OBLICZEŃ ---
 def calculate_wages(hours_list, year, month, rate, bonus):
@@ -24,10 +38,8 @@ def calculate_wages(hours_list, year, month, rate, bonus):
     for i, h in enumerate(hours_list):
         if h <= 0: continue
         try:
-            # i to indeks (0-30), więc i+1 to dzień miesiąca
             curr_d = date(year, month, i + 1)
             wday = curr_d.weekday()
-            # 5 = Sobota, 6 = Niedziela
             if wday == 5: stats["sob"] += h
             elif wday == 6 or curr_d in pl_hols: stats["nie"] += h
             else:
@@ -35,14 +47,10 @@ def calculate_wages(hours_list, year, month, rate, bonus):
                     stats["std"] += 8
                     stats["nad"] += (h - 8)
                 else: stats["std"] += h
-        except ValueError:
-            # Obsługa miesięcy krótszych niż 31 dni
-            continue
+        except ValueError: continue
     return stats
 
 # --- 3. INTERFEJS ---
-st.set_page_config(page_title="AI Kalkulator Zarobków 2026", layout="wide")
-
 with st.sidebar:
     st.header("⚙️ Ustawienia")
     rok = st.selectbox("Rok:", [2025, 2026], index=1)
@@ -58,6 +66,9 @@ st.title("🚀 Inteligentny Kalkulator (Gemini AI)")
 tab1, tab2 = st.tabs(["🧮 Skanowanie i Wynik", "📊 Historia"])
 
 with tab1:
+    if model:
+        st.caption(f"Połączono z modelem: `{model_name}`")
+    
     plik = st.file_uploader("Wgraj zdjęcie grafiku:", type=['jpg', 'jpeg', 'png'])
     
     if plik:
@@ -65,47 +76,40 @@ with tab1:
         st.image(img, width=400)
         
         if st.button("🔍 Odczytaj grafik przez AI"):
-            with st.spinner("Gemini analizuje pismo odręczne..."):
-                try:
-                    # Prompt z instrukcją "Zero-Shot"
-                    prompt = """Znajdź kolumnę 'Ilość godzin' na zdjęciu. 
-                    Odczytaj wartości dla dni 1-31. 
-                    Zwróć dane TYLKO jako listę liczb oddzielonych przecinkami.
-                    Dla dni wolnych lub pustych wpisz 0.
-                    Przykład: 8,8,0,0,12,8..."""
-                    
-                    response = model.generate_content([prompt, img])
-                    
-                    # Oczyszczanie tekstu z ewentualnych komentarzy AI
-                    raw_text = response.text
-                    # Wyciągamy tylko to, co wygląda na liczby (całkowite lub z kropką)
-                    numbers = re.findall(r"(\d+(?:\.\d+)?)", raw_text)
-                    
-                    parsed_numbers = [float(x) for x in numbers]
-                    
-                    # Zapewnienie, że mamy dokładnie 31 dni (dopełnienie zerami)
-                    while len(parsed_numbers) < 31:
-                        parsed_numbers.append(0.0)
+            if not model:
+                st.error("Model AI nie jest gotowy. Sprawdź klucz API.")
+            else:
+                with st.spinner("Gemini analizuje pismo odręczne..."):
+                    try:
+                        prompt = """Odczytaj z tego grafiku 4. kolumnę (Ilość godzin). 
+                        Zwróć TYLKO listę 31 liczb oddzielonych przecinkami dla dni 1-31. 
+                        Wpisz 0 dla dni wolnych. Przykład: 8,8,0,10,8,0..."""
                         
-                    st.session_state['dni_lista'] = parsed_numbers[:31]
-                    st.success("✅ Grafik odczytany pomyślnie!")
-                except Exception as e:
-                    st.error(f"Błąd analizy: {e}")
-                    st.info("Jeśli widzisz błąd 404, sprawdź czy klucz API jest poprawny w Secrets.")
+                        response = model.generate_content([prompt, img])
+                        numbers = re.findall(r"(\d+(?:\.\d+)?)", response.text)
+                        
+                        parsed = [float(x) for x in numbers]
+                        while len(parsed) < 31: parsed.append(0.0)
+                        
+                        st.session_state['dni_lista'] = parsed[:31]
+                        st.success("✅ Odczytano pismo odręczne!")
+                    except Exception as e:
+                        st.error(f"Błąd analizy: {e}")
 
     # Sekcja korekty i wyniki
     if 'dni_lista' in st.session_state:
-        st.subheader("📝 Sprawdź i popraw odczytane godziny")
+        st.subheader("📝 Sprawdź i popraw godziny")
         poprawione = []
-        # Wyświetlamy 7 kolumn (jak w kalendarzu)
         cols = st.columns(7)
         for i in range(31):
             with cols[i % 7]:
                 val = st.number_input(f"Dz {i+1}", value=st.session_state['dni_lista'][i], key=f"d_{i}", step=0.5)
                 poprawione.append(val)
         
-        # Wyliczenia
         res = calculate_wages(poprawione, rok, m_idx, stawka, dodatek)
+        
+        # Wzór na wynagrodzenie brutto
+        # $$Suma = (h_{std} \cdot stawka) + (h_{nad} \cdot (stawka + dodatek)) + (h_{sob} \cdot stawka \cdot 1.5) + (h_{nie} \cdot stawka \cdot 2.0)$$
         total = (res["std"] * stawka) + (res["nad"] * (stawka + dodatek)) + \
                 (res["sob"] * stawka * 1.5) + (res["nie"] * stawka * 2.0)
         
