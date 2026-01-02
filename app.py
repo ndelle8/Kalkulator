@@ -80,4 +80,130 @@ def save_to_excel(new_data):
 st.set_page_config(page_title="Kalkulator czasu pracy", layout="wide")
 
 with st.sidebar:
-    st.header
+    st.header("⚙️ Ustawienia")
+    cur_yr = datetime.now().year
+    lata = list(range(2024, cur_yr + 11))
+    rok = st.selectbox("Rok:", lata, index=lata.index(cur_yr))
+    
+    m_list = ["Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec", 
+              "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"]
+    m_nazwa = st.selectbox("Miesiąc:", m_list, index=datetime.now().month-1)
+    m_idx = m_list.index(m_nazwa) + 1
+    stawka = st.number_input("Stawka podstawowa (zł/h):", value=25.0)
+    dodatek = st.number_input("Dodatek za nadgodziny (zł):", value=15.0)
+
+st.title("Kalkulator czasu pracy")
+
+if active_model_name:
+    st.caption(f"Status: Połączono z silnikiem `{active_model_name}`")
+
+norma_godzin, lista_swiat = get_working_info(rok, m_idx)
+tab1, tab2 = st.tabs(["🧮 Rozliczenie", "📊 Archiwum"])
+
+with tab1:
+    with st.expander(f"📅 Norma i informacje: {m_nazwa} {rok}"):
+        st.write(f"Wymiar czasu pracy: **{norma_godzin} h**")
+        if lista_swiat:
+            for s in lista_swiat: st.write(f"• {s}")
+
+    plik = st.file_uploader("Zrób zdjęcie lub wgraj grafik:", type=['jpg', 'jpeg', 'png'])
+    
+    if plik:
+        # Korekta zdjęcia (ważne dla telefonów)
+        img = Image.open(plik)
+        img = ImageOps.exif_transpose(img)
+        st.image(img, width=300, caption="Podgląd grafiku")
+        
+        if st.button("🚀 ANALIZUJ GRAFIK"):
+            if not model:
+                st.error("Błąd: Nie znaleziono aktywnego modelu AI dla Twojego klucza.")
+            else:
+                with st.spinner("AI analizuje pismo odręczne i urlopy..."):
+                    try:
+                        prompt = """To jest grafik pracy. Zlokalizuj kolumnę 'Ilość godzin'. 
+                        Wypisz 31 wartości oddzielonych przecinkami dla dni 1-31.
+                        ZASADY:
+                        - Jeśli jest liczba (np. 8, 12), wpisz ją.
+                        - Jeśli widzisz 'URL', 'Urlop', 'URZ', wpisz 'U'.
+                        - Jeśli puste lub kreska, wpisz '0'."""
+                        
+                        response = model.generate_content([prompt, img])
+                        items = response.text.replace(" ", "").split(",")
+                        
+                        p_hours, p_url = [], []
+                        for i, item in enumerate(items[:31]):
+                            if 'U' in item.upper():
+                                p_hours.append(8.0)
+                                p_url.append(i + 1)
+                            else:
+                                n = re.findall(r"(\d+(?:\.\d+)?)", item)
+                                p_hours.append(float(n[0]) if n else 0.0)
+                        
+                        while len(p_hours) < 31: p_hours.append(0.0)
+                        st.session_state['dni_lista'] = p_hours
+                        st.session_state['url_dni'] = p_url
+                        st.success("✅ Odczytano!")
+                    except Exception as e: st.error(f"Błąd analizy: {e}")
+
+    if 'dni_lista' in st.session_state:
+        num_d = calendar.monthrange(rok, m_idx)[1]
+        
+        st.subheader("📝 Korekta i wyniki")
+        
+        sel_url = st.multiselect(
+            "Dni oznaczone jako URLOP (8h):",
+            options=range(1, num_d + 1),
+            default=st.session_state.get('url_dni', []),
+            format_func=lambda x: f"Dzień {x} ({get_day_name(rok, m_idx, x)})"
+        )
+
+        popr = []
+        cols = st.columns(7)
+        for i in range(num_d):
+            d_n = i + 1
+            with cols[i % 7]:
+                d_val = 8.0 if d_n in sel_url else st.session_state['dni_lista'][i]
+                v = st.number_input(f"{d_n} {get_day_name(rok, m_idx, d_n)}", 
+                                    value=float(d_val), key=f"f_{i}", step=0.5)
+                popr.append(v)
+        
+        suma_h = sum(popr)
+        nadgodziny = max(0.0, suma_h - norma_godzin)
+        total_pln = (suma_h * stawka) + (nadgodziny * dodatek)
+        
+        st.divider()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Suma godzin", f"{suma_h} h")
+        c2.metric("Norma etatu", f"{norma_godzin} h")
+        c3.metric("Nadgodziny", f"{nadgodziny} h", delta=nadgodziny if nadgodziny > 0 else None)
+        c4.metric("Dni urlopu", f"{len(sel_url)}")
+        
+        st.success(f"### 💰 Wypłata: **{total_pln:,.2f} zł brutto**")
+
+        if st.button("💾 Zapisz do historii"):
+            res = save_to_excel({
+                "Rok": rok, "Miesiąc": m_nazwa, "Godziny Suma": suma_h,
+                "Norma": norma_godzin, "Nadgodziny": nadgodziny,
+                "Stawka": stawka, "Dni Urlopu": len(sel_url), "Suma PLN": round(total_pln, 2)
+            })
+            st.balloons()
+            st.success("Zapisano pomyślnie!")
+
+with tab2:
+    df_db = load_data()
+    if not df_db.empty:
+        df_rok = df_db[df_db['Rok'] == rok].copy()
+        if not df_rok.empty:
+            df_rok['M_Idx'] = df_rok['Miesiąc'].apply(lambda x: m_list.index(x))
+            df_rok = df_rok.sort_values('M_Idx')
+            
+            st.subheader(f"Zarobki w roku {rok}")
+            st.bar_chart(df_rok, x="Miesiąc", y="Suma PLN")
+            st.metric("Suma roczna", f"{df_rok['Suma PLN'].sum():,.2f} zł")
+            st.metric("Wykorzystany urlop", f"{df_rok['Dni Urlopu'].sum()} dni")
+            st.dataframe(df_rok[["Miesiąc", "Godziny Suma", "Nadgodziny", "Dni Urlopu", "Suma PLN"]], use_container_width=True)
+            
+            with open(DB_FILE, "rb") as f:
+                st.download_button("📥 Pobierz bazę Excel", data=f, file_name=f"zarobki_{rok}.xlsx")
+    else:
+        st.info("Brak wpisów w historii.")
