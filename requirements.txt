@@ -4,3 +4,4 @@ holidays
 easyocr
 opencv-python-headless
 numpy
+Pillow
