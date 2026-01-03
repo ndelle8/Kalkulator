@@ -188,4 +188,43 @@ if 'dni_lista' in st.session_state:
     
     sel_url = st.multiselect("Zaznacz dni urlopowe (8h):", range(1, num_d + 1), 
                              default=st.session_state.get('url_dni', []),
-                             format_
+                             format_func=lambda x: f"Dzień {x} ({get_day_name(rok, m_idx, x)})")
+
+    popr = []
+    c_l, c_r = st.columns(2)
+    for i in range(num_d):
+        dn = i + 1
+        with (c_l if i < num_d/2 else c_r):
+            d_init = 8.0 if dn in sel_url else st.session_state['dni_lista'][i]
+            v = st.number_input(f"Dz {dn} ({get_day_name(rok, m_idx, dn)})", 
+                                value=float(d_init), step=0.5, key=f"k_{i}")
+            popr.append(v)
+    
+    suma_h = sum(popr)
+    nadgodziny = max(0.0, suma_h - norma_h)
+    total = (suma_h * stawka) + (nadgodziny * dodatek)
+    
+    st.info(f"### 💰 Wypłata: **{total:,.2f} zł brutto**")
+    st.divider()
+
+    if st.button("📊 Generuj plik Excel z wykresami"):
+        new_row = {
+            "Rok": rok, "Miesiąc": m_nazwa, "Godziny Suma": suma_h,
+            "Norma": norma_h, "Nadgodziny": nadgodziny,
+            "Stawka": stawka, "Dni Urlopu": len(sel_url), "Suma PLN": round(total, 2)
+        }
+        df_base = pd.read_excel(uploaded_file) if uploaded_file else pd.DataFrame(columns=new_row.keys())
+        mask = (df_base['Rok'] == rok) & (df_base['Miesiąc'] == m_nazwa)
+        df_base = df_base[~mask]
+        df_final = pd.concat([df_base, pd.DataFrame([new_row])], ignore_index=True)
+        
+        st.session_state['excel_ready'] = create_excel_with_stats(df_final, st.session_state.get('last_img'))
+        st.success("✅ Gotowe! Pobierz plik poniżej.")
+
+    if 'excel_ready' in st.session_state:
+        st.download_button(
+            label="📥 POBIERZ AKTUALNY PLIK EXCEL",
+            data=st.session_state['excel_ready'],
+            file_name=f"zarobki_{rok}_{m_nazwa}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
