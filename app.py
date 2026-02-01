@@ -11,30 +11,17 @@ from openpyxl.drawing.image import Image as OpenpyxlImage
 from openpyxl.chart import BarChart, Reference
 from io import BytesIO
 
-# --- 1. DYNAMICZNA KONFIGURACJA AI (Fix błędu 404) ---
+# --- 1. KONFIGURACJA AI ---
 @st.cache_resource
 def get_working_model():
     try:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
         available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # Priorytet dla stabilnych modeli Flash
-        target_models = [
-            "models/gemini-1.5-flash-8b", 
-            "models/gemini-1.5-flash"
-        ]
-        
-        for target in target_models:
-            if target in available:
-                return genai.GenerativeModel(target), target
-        
-        fallback = [m for m in available if "flash" in m and "exp" not in m]
-        if fallback:
-            return genai.GenerativeModel(fallback[0]), fallback[0]
-            
+        # Wybieramy stabilny model 1.5 Flash dla najlepszych limitów
+        for target in ["models/gemini-1.5-flash-8b", "models/gemini-1.5-flash"]:
+            if target in available: return genai.GenerativeModel(target), target
         return None, "Brak połączenia"
-    except Exception as e:
-        return None, f"Błąd: {str(e)}"
+    except Exception: return None, "Błąd"
 
 model, active_model_name = get_working_model()
 
@@ -59,43 +46,79 @@ def get_day_name(year, month, day):
     try: return dni[date(year, month, day).weekday()]
     except: return ""
 
-def create_excel_with_stats(df_final, pil_image=None):
-    df_final['M_Idx'] = df_final['Miesiąc'].apply(lambda x: M_LIST.index(x))
-    df_final = df_final.sort_values(['Rok', 'M_Idx']).drop(columns=['M_Idx'])
-    
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_final.to_excel(writer, index=False, sheet_name='Zarobki')
-        stats_df = df_final[['Miesiąc', 'Godziny Suma', 'Nadgodziny', 'Suma PLN']]
-        stats_df.to_excel(writer, index=False, sheet_name='Statystyki')
+def process_excel_save(uploaded_file, new_data, pil_image):
+    """Główna funkcja zapisu: zachowuje stare zdjęcia i aktualizuje dane."""
+    if uploaded_file:
+        # Ładujemy istniejący plik
+        wb = openpyxl.load_workbook(BytesIO(uploaded_file.read()))
+    else:
+        # Tworzymy nowy jeśli nic nie wgrano
+        wb = openpyxl.Workbook()
+        wb.active.title = "Zarobki"
+        ws = wb.active
+        ws.append(["Rok", "Miesiąc", "Godziny Suma", "Norma", "Nadgodziny", "Stawka", "Dni Urlopu", "Suma PLN", "Grafik"])
 
-    output.seek(0)
-    wb = openpyxl.load_workbook(output)
+    ws = wb["Zarobki"]
     
-    ws1 = wb['Zarobki']
+    # Szukamy czy ten rok i miesiąc już są w tabeli
+    found_row = None
+    for row in range(2, ws.max_row + 1):
+        if str(ws.cell(row=row, column=1).value) == str(new_data["Rok"]) and \
+           str(ws.cell(row=row, column=2).value) == str(new_data["Miesiąc"]):
+            found_row = row
+            break
+    
+    target_row = found_row if found_row else ws.max_row + 1
+    
+    # Wpisujemy dane tekstowe
+    ws.cell(row=target_row, column=1, value=new_data["Rok"])
+    ws.cell(row=target_row, column=2, value=new_data["Miesiąc"])
+    ws.cell(row=target_row, column=3, value=new_data["Godziny Suma"])
+    ws.cell(row=target_row, column=4, value=new_data["Norma"])
+    ws.cell(row=target_row, column=5, value=new_data["Nadgodziny"])
+    ws.cell(row=target_row, column=6, value=new_data["Stawka"])
+    ws.cell(row=target_row, column=7, value=new_data["Dni Urlopu"])
+    ws.cell(row=target_row, column=8, value=new_data["Suma PLN"])
+
+    # Dodajemy zdjęcie
     if pil_image:
-        row_idx = ws1.max_row
         img_temp = pil_image.copy()
         img_temp.thumbnail((1600, 2000))
         img_buf = BytesIO()
         img_temp.save(img_buf, format="PNG")
         img_xl = OpenpyxlImage(img_buf)
         img_xl.width, img_xl.height = 80, 105
-        ws1.add_image(img_xl, f'I{row_idx}')
-        ws1.row_dimensions[row_idx].height = 80
-        ws1.column_dimensions['I'].width = 15
+        ws.add_image(img_xl, f'I{target_row}')
+        ws.row_dimensions[target_row].height = 80
+        ws.column_dimensions['I'].width = 15
 
-    ws2 = wb['Statystyki']
-    max_r = ws2.max_row
-    if max_r > 1:
+    # Aktualizacja Statystyk i Wykresów
+    if "Statystyki" in wb.sheetnames: del wb["Statystyki"]
+    ws_stats = wb.create_sheet("Statystyki")
+    
+    # Pobieramy dane do wykresów z arkusza Zarobki
+    data_for_stats = []
+    for r in range(1, ws.max_row + 1):
+        data_for_stats.append([ws.cell(r, c).value for c in range(1, 9)])
+    
+    df_temp = pd.DataFrame(data_for_stats[1:], columns=data_for_stats[0])
+    df_temp['M_Idx'] = df_temp['Miesiąc'].apply(lambda x: M_LIST.index(x) if x in M_LIST else 0)
+    df_temp = df_temp.sort_values(['Rok', 'M_Idx'])
+    
+    # Zapisujemy tabelę statystyk
+    for r_idx, row in enumerate(df_temp[['Miesiąc', 'Godziny Suma', 'Nadgodziny', 'Suma PLN']].values, 1):
+        if r_idx == 1: ws_stats.append(['Miesiąc', 'Godziny Suma', 'Nadgodziny', 'Suma PLN'])
+        ws_stats.append(list(row))
+
+    # Wykresy
+    max_s = ws_stats.max_row
+    if max_s > 1:
         for i, title in enumerate(["Suma Godzin", "Nadgodziny", "Zarobki PLN"], 2):
-            chart = BarChart()
-            chart.title = title
-            data = Reference(ws2, min_col=i, min_row=1, max_row=max_r)
-            cats = Reference(ws2, min_col=1, min_row=2, max_row=max_r)
-            chart.add_data(data, titles_from_data=True)
-            chart.set_categories(cats)
-            ws2.add_chart(chart, f"F{2 + (i-2)*15}")
+            c = BarChart()
+            c.title = title
+            c.add_data(Reference(ws_stats, min_col=i, min_row=1, max_row=max_s), titles_from_data=True)
+            c.set_categories(Reference(ws_stats, min_col=1, min_row=2, max_row=max_s))
+            ws_stats.add_chart(c, f"F{2 + (i-2)*15}")
 
     final_out = BytesIO()
     wb.save(final_out)
@@ -105,8 +128,8 @@ def create_excel_with_stats(df_final, pil_image=None):
 st.set_page_config(page_title="Kalkulator czasu pracy", layout="wide")
 
 with st.sidebar:
-    st.title("📂 Zarządzanie Plikiem")
-    uploaded_file = st.file_uploader("Wgraj swoją bazę (.xlsx):", type="xlsx")
+    st.title("📂 Baza danych")
+    uploaded_file = st.file_uploader("Wgraj swój plik Excel (.xlsx):", type="xlsx")
     st.divider()
     st.header("⚙️ Ustawienia")
     cur_yr = datetime.now().year
@@ -116,15 +139,13 @@ with st.sidebar:
     dodatek = st.number_input("Dodatek za nadgodziny (zł):", value=15.0)
 
 st.title("Kalkulator czasu pracy")
-if active_model_name:
-    st.caption(f"🤖 Silnik AI: `{active_model_name}`")
+st.caption(f"🤖 Aktywny model: `{active_model_name}`")
 
-# Norma godzin
 m_idx = M_LIST.index(m_nazwa) + 1
 norma_h, swieta = get_working_info(rok, m_idx)
 
-with st.expander(f"📅 Norma i święta dla {m_nazwa} {rok}"):
-    st.write(f"Wymiar czasu pracy: **{norma_h} h**")
+with st.expander(f"📅 Norma dla {m_nazwa} {rok}", expanded=False):
+    st.write(f"Wymiar: **{norma_h} h**")
     for s in swieta: st.write(f"• {s}")
 
 plik = st.file_uploader("Wgraj zdjęcie grafiku:", type=['jpg', 'jpeg', 'png'])
@@ -134,94 +155,71 @@ if plik:
     st.image(img, width=300)
     
     if st.button("🚀 SKANUJ GRAFIK"):
-        if model:
-            with st.spinner("AI analizuje grafik..."):
-                try:
-                    # POPRAWIONY PROMPT: "x" i "-" to zero
-                    prompt = """Odczytaj 4. kolumnę (Ilość godzin) dla dni 1-31. 
-                    Zwróć dane w formacie: 1: [wart], 2: [wart]... 
-                    ZASADY: 
-                    - Symbole 'x', 'X', '-' oraz puste pola to '0'.
-                    - 'URL', 'Urlop', 'URZ', 'U' to 'U'.
-                    - Liczby (np. 8, 12, 10.5) to wartości godzin."""
-                    
-                    response = model.generate_content([prompt, img])
-                    pairs = re.findall(r"(\d+):\s*([0-9.UuXx-]+)", response.text)
-                    
-                    d_list = [0.0]*31
-                    u_list = []
-                    for d, v in pairs:
-                        dn = int(d)
-                        if dn <= 31:
-                            val_str = v.upper()
-                            if 'U' in val_str:
-                                d_list[dn-1] = 8.0
-                                u_list.append(dn)
-                            elif val_str in ['X', '-', '']:
-                                d_list[dn-1] = 0.0
-                            else:
-                                try: d_list[dn-1] = float(re.findall(r"(\d+(?:\.\d+)?)", val_str)[0])
-                                except: d_list[dn-1] = 0.0
-                                
-                    st.session_state['dni_lista'] = d_list
-                    st.session_state['url_dni'] = u_list
-                    st.session_state['last_img'] = img
-                    st.success("✅ Grafik odczytany!")
-                except Exception as e:
-                    st.error(f"Błąd AI: {e}")
+        with st.spinner("AI analizuje grafik..."):
+            try:
+                prompt = """Odczytaj kolumnę 'Ilość godzin' dla dni 1-31. Format: 1: [wart], 2: [wart]... 
+                ZASADY: 'x', 'X', '-' to 0. 'URL', 'Urlop' to U."""
+                response = model.generate_content([prompt, img])
+                pairs = re.findall(r"(\d+):\s*([0-9.UuXx-]+)", response.text)
+                d_list = [0.0]*31
+                u_list = []
+                for d, v in pairs:
+                    dn = int(d)
+                    if dn <= 31:
+                        val = v.upper().strip()
+                        if 'U' in val:
+                            d_list[dn-1] = 8.0
+                            u_list.append(dn)
+                        elif val in ['X', '-', '']: d_list[dn-1] = 0.0
+                        else:
+                            try: d_list[dn-1] = float(re.findall(r"(\d+(?:\.\d+)?)", val)[0])
+                            except: pass
+                st.session_state['dni_lista'] = d_list
+                st.session_state['url_dni'] = u_list
+                st.session_state['last_img'] = img
+                st.success("✅ Odczytano!")
+            except Exception as e: st.error(f"Błąd AI: {e}")
 
-# Sekcja Korekty i Podsumowania
 if 'dni_lista' in st.session_state:
     st.divider()
-    num_days_in_month = calendar.monthrange(rok, m_idx)[1]
-    st.subheader("📝 Korekta i wyniki na żywo")
+    num_d = calendar.monthrange(rok, m_idx)[1]
+    st.subheader("📝 Korekta i wyniki")
     
-    sel_url = st.multiselect("Dni urlopowe (8h):", range(1, num_days_in_month + 1), 
+    sel_url = st.multiselect("Dni urlopowe (8h):", range(1, num_d + 1), 
                              default=st.session_state.get('url_dni', []),
                              format_func=lambda x: f"Dzień {x} ({get_day_name(rok, m_idx, x)})")
 
     popr = []
     c_l, c_r = st.columns(2)
-    for i in range(num_days_in_month):
+    for i in range(num_d):
         dn = i + 1
-        with (c_l if i < num_days_in_month/2 else c_r):
+        with (c_l if i < num_d/2 else c_r):
             d_init = 8.0 if dn in sel_url else st.session_state['dni_lista'][i]
-            v = st.number_input(f"Dz {dn} ({get_day_name(rok, m_idx, dn)})", 
-                                value=float(d_init), step=0.5, key=f"k_{i}")
+            v = st.number_input(f"Dz {dn} ({get_day_name(rok, m_idx, dn)})", value=float(d_init), step=0.5, key=f"k_{i}")
             popr.append(v)
     
     suma_h = sum(popr)
     nadgodziny = max(0.0, suma_h - norma_h)
     total = (suma_h * stawka) + (nadgodziny * dodatek)
     
-    # --- WYŚWIETLANIE SUMY NA STRONIE GŁÓWNEJ ---
+    # --- METRYKI NA STRONIE GŁÓWNEJ ---
     st.divider()
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Suma godzin", f"{suma_h} h")
-    m2.metric("Nadgodziny", f"{nadgodziny} h")
-    m3.metric("Wypłata BRUTTO", f"{total:,.2f} zł")
-    
-    st.write(f"ℹ️ *Obliczenie: ({suma_h}h x {stawka}zł) + ({nadgodziny}h nadgodzin x {dodatek}zł)*")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Suma godzin", f"{suma_h} h")
+    col2.metric("Nadgodziny", f"{nadgodziny} h")
+    col3.metric("Wypłata BRUTTO", f"{total:,.2f} zł")
     st.divider()
 
-    if st.button("📊 Generuj plik Excel ze statystykami"):
-        new_row = {
+    if st.button("📊 Zapisz i przygotuj plik Excel"):
+        excel_ready = process_excel_save(uploaded_file, {
             "Rok": rok, "Miesiąc": m_nazwa, "Godziny Suma": suma_h,
             "Norma": norma_h, "Nadgodziny": nadgodziny,
             "Stawka": stawka, "Dni Urlopu": len(sel_url), "Suma PLN": round(total, 2)
-        }
-        df_base = pd.read_excel(uploaded_file) if uploaded_file else pd.DataFrame(columns=new_row.keys())
-        mask = (df_base['Rok'] == rok) & (df_base['Miesiąc'] == m_nazwa)
-        df_base = df_base[~mask]
-        df_final = pd.concat([df_base, pd.DataFrame([new_row])], ignore_index=True)
+        }, st.session_state.get('last_img'))
         
-        st.session_state['excel_ready'] = create_excel_with_stats(df_final, st.session_state.get('last_img'))
-        st.success("✅ Plik gotowy!")
+        st.session_state['excel_ready'] = excel_ready
+        st.success("✅ Plik zaktualizowany (stare zdjęcia zachowane)!")
 
     if 'excel_ready' in st.session_state:
-        st.download_button(
-            label="📥 POBIERZ AKTUALNY PLIK EXCEL",
-            data=st.session_state['excel_ready'],
-            file_name=f"zarobki_{rok}_{m_nazwa}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.download_button("📥 POBIERZ AKTUALNY EXCEL", data=st.session_state['excel_ready'], 
+                           file_name=f"zarobki_{rok}_{m_nazwa}.xlsx")
